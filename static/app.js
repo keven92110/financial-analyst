@@ -342,28 +342,27 @@ async function showStock(ticker) {
             '<div style="text-align:center;padding:60px;color:#95a5a6;"><div class="spinner" style="margin:0 auto 12px;"></div>Loading...</div>';
     });
 
-    // Fetch all endpoints in parallel — each tab updates independently
-    api(`/api/stock/${ticker}/financials`)
-        .then(d => { if (d) renderFinancials('tab-financials', d); })
-        .catch(e => { document.getElementById('tab-financials').innerHTML = `<p style="color:#e74c3c;padding:20px;">Failed to load financials: ${e.message}</p>`; });
+    // Single combined API call — fetches everything once
+    try {
+        const data = await api(`/api/stock/${ticker}/all`);
 
-    api(`/api/stock/${ticker}/eps`)
-        .then(d => { if (d) renderEPS('tab-eps', d, ticker); })
-        .catch(e => { document.getElementById('tab-eps').innerHTML = `<p style="color:#e74c3c;padding:20px;">Failed to load EPS: ${e.message}</p>`; });
+        if (data.financials) renderFinancials('tab-financials', data.financials);
+        else document.getElementById('tab-financials').innerHTML = '<p style="padding:20px;color:#95a5a6;">No financial data</p>';
 
-    api(`/api/stock/${ticker}/pe-river`)
-        .then(d => {
-            if (d && !d.error) renderPERiver('tab-pe-river', d, ticker);
-            else document.getElementById('tab-pe-river').innerHTML = `<p style="color:#95a5a6;padding:20px;">${d?.error || 'No data'}</p>`;
-        })
-        .catch(e => { document.getElementById('tab-pe-river').innerHTML = `<p style="color:#e74c3c;padding:20px;">Failed to load PE river: ${e.message}</p>`; });
+        if (data.eps) renderEPS('tab-eps', data.eps, ticker);
+        else document.getElementById('tab-eps').innerHTML = '<p style="padding:20px;color:#95a5a6;">No EPS data</p>';
 
-    api(`/api/stock/${ticker}/dcf-river`)
-        .then(d => {
-            if (d && !d.error) renderDCFRiver('tab-dcf-river', d, ticker);
-            else document.getElementById('tab-dcf-river').innerHTML = `<p style="color:#95a5a6;padding:20px;">${d?.error || 'No data'}</p>`;
-        })
-        .catch(e => { document.getElementById('tab-dcf-river').innerHTML = `<p style="color:#e74c3c;padding:20px;">Failed to load DCF: ${e.message}</p>`; });
+        if (data.pe_river && !data.pe_river.error) renderPERiver('tab-pe-river', data.pe_river, ticker);
+        else document.getElementById('tab-pe-river').innerHTML = `<p style="padding:20px;color:#95a5a6;">${data.pe_river?.error || 'No data'}</p>`;
+
+        if (data.dcf_river && !data.dcf_river.error) renderDCFRiver('tab-dcf-river', data.dcf_river, ticker);
+        else document.getElementById('tab-dcf-river').innerHTML = `<p style="padding:20px;color:#95a5a6;">${data.dcf_river?.error || 'No data'}</p>`;
+    } catch(e) {
+        ['financials','pe-river','dcf-river','eps'].forEach(t => {
+            document.getElementById('tab-' + t).innerHTML =
+                `<p style="color:#e74c3c;padding:20px;">Failed to load: ${e.message}</p>`;
+        });
+    }
 }
 
 
