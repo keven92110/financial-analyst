@@ -431,9 +431,11 @@ function renderPERiver(containerId, data, ticker) {
     const n = data.bands.length;
 
     // Bands (bottom to top = highest PE first)
+    // band[0] = highest PE (expensive=red), band[n-1] = lowest PE (cheap=green)
     for (let i = n - 1; i >= 0; i--) {
         const band = data.bands[i];
-        // Upper boundary
+        // Color: band 0 (high PE) → red, band n-1 (low PE) → green
+        const colorIdx = n - 1 - i;
         traces.push({
             x: data.dates, y: band.lower, mode: 'lines',
             line: {width: 0}, showlegend: false, hoverinfo: 'skip',
@@ -441,7 +443,7 @@ function renderPERiver(containerId, data, ticker) {
         traces.push({
             x: data.dates, y: band.upper, mode: 'lines',
             line: {width: 0}, fill: 'tonexty',
-            fillcolor: hexToRgba(bandColor(i, n), 0.5),
+            fillcolor: hexToRgba(bandColor(colorIdx, n), 0.5),
             name: band.label,
         });
     }
@@ -453,12 +455,17 @@ function renderPERiver(containerId, data, ticker) {
         connectgaps: false,
     });
 
+    const isMobile = window.innerWidth < 768;
     Plotly.newPlot('chart-pe', traces, {
         ...PLOTLY_LAYOUT_BASE,
         title: {text: `${ticker} Forward P/E River`, font: {size: 14}},
         yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, title: 'Price ($)'},
-        legend: {font: {size: 8}, x: 1.02, y: 0.5, xanchor: 'left'},
-        margin: {l: 50, r: 160, t: 40, b: 40},
+        legend: isMobile
+            ? {font: {size: 7}, x: 0, y: 1, bgcolor: 'rgba(255,255,255,0.7)'}
+            : {font: {size: 8}, x: 1.02, y: 0.5, xanchor: 'left'},
+        margin: isMobile
+            ? {l: 40, r: 10, t: 40, b: 40}
+            : {l: 50, r: 160, t: 40, b: 40},
         shapes: [{
             type: 'line', x0: data.today, x1: data.today,
             y0: 0, y1: 1, yref: 'paper',
@@ -532,17 +539,22 @@ function renderDCFRiver(containerId, data, ticker) {
     if (data.implied_erp !== null) titleParts.push(`Price ERP: ${data.implied_erp}%`);
     if (data.iv_erp_now !== null) titleParts.push(`IV ERP: ${(data.iv_erp_now * 100).toFixed(1)}%`);
 
+    const isMobileDcf = window.innerWidth < 768;
     Plotly.newPlot('chart-dcf', traces, {
         ...PLOTLY_LAYOUT_BASE,
-        title: {text: titleParts.join(' | '), font: {size: 13}},
+        title: {text: titleParts.join(' | '), font: {size: isMobileDcf ? 11 : 13}},
         yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, title: 'Price ($)', range: [0, data.y_top]},
         yaxis2: {
-            title: 'EPS ($)', overlaying: 'y', side: 'right',
+            title: isMobileDcf ? '' : 'EPS ($)', overlaying: 'y', side: 'right',
             titlefont: {color: '#8B4513'}, tickfont: {color: '#8B4513'},
             gridcolor: 'rgba(0,0,0,0)',
         },
-        legend: {font: {size: 8}, x: 1.12, y: 0.5, xanchor: 'left'},
-        margin: {l: 50, r: 180, t: 40, b: 40},
+        legend: isMobileDcf
+            ? {font: {size: 7}, x: 0, y: 1, bgcolor: 'rgba(255,255,255,0.7)'}
+            : {font: {size: 8}, x: 1.12, y: 0.5, xanchor: 'left'},
+        margin: isMobileDcf
+            ? {l: 40, r: 30, t: 40, b: 40}
+            : {l: 50, r: 180, t: 40, b: 50},
         shapes: [{
             type: 'line', x0: data.today, x1: data.today,
             y0: 0, y1: 1, yref: 'paper',
