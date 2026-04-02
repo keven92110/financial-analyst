@@ -329,9 +329,12 @@ def get_pe_river(ticker: str):
     if ticker not in TICKERS:
         raise HTTPException(status_code=404, detail=f"Ticker {ticker} not in list")
 
+    print(f"[PE-River] Fetching EPS for {ticker}...")
     eps_data = load_all_eps([ticker])[ticker]
+    print(f"[PE-River] Fetching price for {ticker}...")
     stock = yf.Ticker(ticker)
     price_series = stock.history(period='5y')['Close']
+    print(f"[PE-River] Computing for {ticker}, price points: {len(price_series)}")
 
     today = pd.Timestamp(date.today())
     today_tz = pd.Timestamp(date.today(), tz='America/New_York')
@@ -384,9 +387,11 @@ def get_dcf_river(ticker: str):
     if ticker not in TICKERS:
         raise HTTPException(status_code=404, detail=f"Ticker {ticker} not in list")
 
+    print(f"[DCF] Fetching data for {ticker}...")
     eps_data = load_all_eps([ticker])[ticker]
     stock = yf.Ticker(ticker)
     price_series = stock.history(period='5y')['Close']
+    print(f"[DCF] Data ready for {ticker}")
 
     # Rates
     rates = _cache.get('rates') or fetch_all_rates()

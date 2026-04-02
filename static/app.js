@@ -227,10 +227,32 @@ function renderRates(data) {
     }
 
     if (traces.length) {
+        // Determine x-axis range: extend past last FOMC dot or futures date
+        let xEnd = new Date().toISOString().slice(0,10);
+        if (data.fomc_dots && data.fomc_dots.dates.length) {
+            const lastDot = data.fomc_dots.dates[data.fomc_dots.dates.length - 1];
+            if (lastDot > xEnd) xEnd = lastDot;
+        }
+        if (data.fed_futures && data.fed_futures.dates.length) {
+            const lastFut = data.fed_futures.dates[data.fed_futures.dates.length - 1];
+            if (lastFut > xEnd) xEnd = lastFut;
+        }
+        // Add 3 months padding
+        const endDate = new Date(xEnd);
+        endDate.setMonth(endDate.getMonth() + 3);
+        xEnd = endDate.toISOString().slice(0, 10);
+
         Plotly.newPlot('chart-rates', traces, {
             ...PLOTLY_LAYOUT_BASE,
             title: {text: 'Fed Funds Rate & Market Expectations', font: {size: 13}},
-            yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, rangemode: 'tozero'},
+            xaxis: {
+                ...PLOTLY_LAYOUT_BASE.xaxis,
+                range: ['2020-01-01', xEnd],
+                dtick: 'M6',
+                tickformat: '%Y-%m',
+                tickangle: -30,
+            },
+            yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, rangemode: 'tozero', title: 'Rate (%)'},
             legend: {font: {size: 9}, x: 0.01, y: 0.99, bgcolor: 'rgba(255,255,255,0.7)'},
             shapes: [{
                 type: 'line', x0: new Date().toISOString().slice(0,10),
@@ -314,22 +336,34 @@ async function showStock(ticker) {
         });
     });
 
-    showLoading(`Loading ${ticker} data...`);
+    // Show loading in each tab
+    ['financials','pe-river','dcf-river','eps'].forEach(t => {
+        document.getElementById('tab-' + t).innerHTML =
+            '<div style="text-align:center;padding:60px;color:#95a5a6;"><div class="spinner" style="margin:0 auto 12px;"></div>Loading...</div>';
+    });
 
-    // Fetch all endpoints in parallel
-    const [finData, peData, dcfData, epsData] = await Promise.all([
-        api(`/api/stock/${ticker}/financials`).catch(e => null),
-        api(`/api/stock/${ticker}/pe-river`).catch(e => null),
-        api(`/api/stock/${ticker}/dcf-river`).catch(e => null),
-        api(`/api/stock/${ticker}/eps`).catch(e => null),
-    ]);
+    // Fetch all endpoints in parallel — each tab updates independently
+    api(`/api/stock/${ticker}/financials`)
+        .then(d => { if (d) renderFinancials('tab-financials', d); })
+        .catch(e => { document.getElementById('tab-financials').innerHTML = `<p style="color:#e74c3c;padding:20px;">Failed to load financials: ${e.message}</p>`; });
 
-    hideLoading();
+    api(`/api/stock/${ticker}/eps`)
+        .then(d => { if (d) renderEPS('tab-eps', d, ticker); })
+        .catch(e => { document.getElementById('tab-eps').innerHTML = `<p style="color:#e74c3c;padding:20px;">Failed to load EPS: ${e.message}</p>`; });
 
-    if (finData) renderFinancials('tab-financials', finData);
-    if (peData && !peData.error) renderPERiver('tab-pe-river', peData, ticker);
-    if (dcfData && !dcfData.error) renderDCFRiver('tab-dcf-river', dcfData, ticker);
-    if (epsData) renderEPS('tab-eps', epsData, ticker);
+    api(`/api/stock/${ticker}/pe-river`)
+        .then(d => {
+            if (d && !d.error) renderPERiver('tab-pe-river', d, ticker);
+            else document.getElementById('tab-pe-river').innerHTML = `<p style="color:#95a5a6;padding:20px;">${d?.error || 'No data'}</p>`;
+        })
+        .catch(e => { document.getElementById('tab-pe-river').innerHTML = `<p style="color:#e74c3c;padding:20px;">Failed to load PE river: ${e.message}</p>`; });
+
+    api(`/api/stock/${ticker}/dcf-river`)
+        .then(d => {
+            if (d && !d.error) renderDCFRiver('tab-dcf-river', d, ticker);
+            else document.getElementById('tab-dcf-river').innerHTML = `<p style="color:#95a5a6;padding:20px;">${d?.error || 'No data'}</p>`;
+        })
+        .catch(e => { document.getElementById('tab-dcf-river').innerHTML = `<p style="color:#e74c3c;padding:20px;">Failed to load DCF: ${e.message}</p>`; });
 }
 
 
