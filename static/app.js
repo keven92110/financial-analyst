@@ -2,15 +2,13 @@
 const TICKERS = ['MSFT','AAPL','NVDA','AMD','GOOG','META','TSM','TSLA','PLTR','APP','MCD','COST'];
 const PLOTLY_CFG = {responsive: true, displayModeBar: false};
 const PLOTLY_LAYOUT_BASE = {
-    margin: {l: 50, r: 20, t: 36, b: 50},
+    margin: {l: 50, r: 20, t: 36, b: 40},
     font: {family: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif', size: 11},
     paper_bgcolor: 'white',
     plot_bgcolor: 'white',
     xaxis: {gridcolor: '#ecf0f1'},
     yaxis: {gridcolor: '#ecf0f1'},
 };
-// Date x-axis preset for time-series charts
-const DATE_XAXIS = {gridcolor: '#ecf0f1', type: 'date', tickformat: '%Y-%m', dtick: 'M3', tickangle: -30};
 
 // RdYlGn_r colorscale for river bands
 function bandColor(i, total) {
@@ -248,9 +246,11 @@ function renderRates(data) {
             ...PLOTLY_LAYOUT_BASE,
             title: {text: 'Fed Funds Rate & Market Expectations', font: {size: 13}},
             xaxis: {
-                ...DATE_XAXIS,
+                ...PLOTLY_LAYOUT_BASE.xaxis,
                 range: ['2020-01-01', xEnd],
                 dtick: 'M6',
+                tickformat: '%Y-%m',
+                tickangle: -30,
             },
             yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, rangemode: 'tozero', title: 'Rate (%)'},
             legend: {font: {size: 9}, x: 0.01, y: 0.99, bgcolor: 'rgba(255,255,255,0.7)'},
@@ -288,7 +288,6 @@ function renderIndices(data) {
     Plotly.newPlot('chart-indices', traces, {
         ...PLOTLY_LAYOUT_BASE,
         title: {text: 'US Indices (6M % Change)', font: {size: 13}},
-        xaxis: {...DATE_XAXIS, dtick: 'M1'},
         yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, title: 'Change (%)'},
         legend: {font: {size: 9}, x: 0.01, y: 0.99, bgcolor: 'rgba(255,255,255,0.7)'},
         shapes: shapes,
@@ -304,7 +303,6 @@ function renderGold(data) {
     }], {
         ...PLOTLY_LAYOUT_BASE,
         title: {text: 'Gold (GC=F) 6-Month', font: {size: 13}},
-        xaxis: {...DATE_XAXIS, dtick: 'M1'},
         yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, title: 'Price ($)'},
     }, PLOTLY_CFG);
 }
@@ -456,10 +454,9 @@ function renderPERiver(containerId, data, ticker) {
     Plotly.newPlot('chart-pe', traces, {
         ...PLOTLY_LAYOUT_BASE,
         title: {text: `${ticker} Forward P/E River`, font: {size: 14}},
-        xaxis: {...DATE_XAXIS, dtick: 'M6'},
         yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, title: 'Price ($)'},
         legend: {font: {size: 8}, x: 1.02, y: 0.5, xanchor: 'left'},
-        margin: {l: 50, r: 160, t: 40, b: 50},
+        margin: {l: 50, r: 160, t: 40, b: 40},
         shapes: [{
             type: 'line', x0: data.today, x1: data.today,
             y0: 0, y1: 1, yref: 'paper',
@@ -536,7 +533,6 @@ function renderDCFRiver(containerId, data, ticker) {
     Plotly.newPlot('chart-dcf', traces, {
         ...PLOTLY_LAYOUT_BASE,
         title: {text: titleParts.join(' | '), font: {size: 13}},
-        xaxis: {...DATE_XAXIS, dtick: 'M6'},
         yaxis: {...PLOTLY_LAYOUT_BASE.yaxis, title: 'Price ($)', range: [0, data.y_top]},
         yaxis2: {
             title: 'EPS ($)', overlaying: 'y', side: 'right',
@@ -544,7 +540,7 @@ function renderDCFRiver(containerId, data, ticker) {
             gridcolor: 'rgba(0,0,0,0)',
         },
         legend: {font: {size: 8}, x: 1.12, y: 0.5, xanchor: 'left'},
-        margin: {l: 50, r: 180, t: 40, b: 50},
+        margin: {l: 50, r: 180, t: 40, b: 40},
         shapes: [{
             type: 'line', x0: data.today, x1: data.today,
             y0: 0, y1: 1, yref: 'paper',
