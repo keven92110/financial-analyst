@@ -279,7 +279,11 @@ def get_stock_all(ticker: str):
         result['dcf_river'] = {'error': str(e)}
 
     print(f"[Stock-All] {ticker} done in {_time.time()-t0:.1f}s")
-    return _set_cached(f'stock_all_{ticker}', result)
+    # Only cache if PE and DCF succeeded (don't cache errors)
+    has_error = ('error' in result.get('pe_river', {})) or ('error' in result.get('dcf_river', {}))
+    if not has_error:
+        _set_cached(f'stock_all_{ticker}', result)
+    return result
 
 
 def _build_eps_response(eps_data):
