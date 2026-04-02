@@ -2,6 +2,7 @@
 const TICKERS = ['MSFT','AAPL','NVDA','AMD','GOOG','META','TSM','TSLA','PLTR','APP','MCD','COST'];
 const PLOTLY_CFG = {responsive: true, displayModeBar: false, staticPlot: true};
 const PLOTLY_LAYOUT_BASE = {
+    autosize: true,
     margin: {l: 50, r: 20, t: 36, b: 40},
     font: {family: '-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, sans-serif', size: 11},
     paper_bgcolor: 'white',
