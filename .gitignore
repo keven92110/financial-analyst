@@ -1,0 +1,25 @@
+# Cache files
+eps_cache/
+eps_history/
+financials_cache/
+rates_cache/
+rates_history/
+__pycache__/
+*.pyc
+
+# Environment
+.env
+.env.txt
+
+# IDE
+.vscode/
+.idea/
+
+# ngrok
+ngrok.yml
+
+# OS
+Thumbs.db
+.DS_Store
+*.xlsx
+Options/

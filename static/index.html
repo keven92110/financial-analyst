@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Financial Analyst</title>
+    <script src="https://cdn.plot.ly/plotly-2.35.0.min.js"></script>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <!-- Navigation -->
+    <nav id="navbar">
+        <a href="#/" class="nav-btn nav-dashboard" id="nav-dashboard">Dashboard</a>
+        <div class="nav-divider"></div>
+        <div class="ticker-list" id="ticker-list"></div>
+    </nav>
+
+    <!-- Loading overlay -->
+    <div id="loading" class="loading-overlay" style="display:none;">
+        <div class="spinner"></div>
+        <p id="loading-text">Loading...</p>
+    </div>
+
+    <!-- Main content -->
+    <main id="app"></main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

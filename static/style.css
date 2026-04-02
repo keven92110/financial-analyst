@@ -1,0 +1,251 @@
+/* ─── Reset & Base ─────────────────────────────────────────────────── */
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #f5f6fa;
+    color: #2c3e50;
+    min-height: 100vh;
+}
+
+/* ─── Navigation ──────────────────────────────────────────────────── */
+#navbar {
+    display: flex;
+    align-items: center;
+    background: #2c3e50;
+    padding: 0 12px;
+    height: 48px;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    gap: 4px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.nav-btn {
+    display: inline-block;
+    padding: 8px 16px;
+    color: #ecf0f1;
+    text-decoration: none;
+    border-radius: 4px;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background 0.2s;
+    border: none;
+    background: none;
+}
+.nav-btn:hover { background: #34495e; }
+.nav-btn.active { background: #3498db; color: #fff; }
+.nav-dashboard { font-weight: 700; font-size: 14px; }
+
+.nav-divider {
+    width: 1px;
+    height: 28px;
+    background: #4a6278;
+    margin: 0 6px;
+    flex-shrink: 0;
+}
+
+.ticker-list {
+    display: flex;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+/* ─── Loading ─────────────────────────────────────────────────────── */
+.loading-overlay {
+    position: fixed;
+    top: 48px; left: 0; right: 0; bottom: 0;
+    background: rgba(255,255,255,0.85);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 50;
+}
+.spinner {
+    width: 40px; height: 40px;
+    border: 4px solid #ddd;
+    border-top-color: #3498db;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+#loading-text { margin-top: 12px; color: #7f8c8d; font-size: 14px; }
+
+/* ─── Main Content ────────────────────────────────────────────────── */
+#app {
+    padding: 16px;
+    max-width: 1400px;
+    margin: 0 auto;
+}
+
+/* ─── Dashboard ───────────────────────────────────────────────────── */
+.fed-status {
+    background: #fff;
+    border-radius: 8px;
+    padding: 16px 24px;
+    margin-bottom: 16px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    flex-wrap: wrap;
+}
+.fed-rate {
+    font-size: clamp(28px, 5vw, 42px);
+    font-weight: 700;
+    color: #2c3e50;
+}
+.fed-target {
+    font-size: 14px;
+    color: #7f8c8d;
+}
+.fed-label {
+    font-size: 12px;
+    color: #95a5a6;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.dashboard-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+}
+
+.card {
+    background: #fff;
+    border-radius: 8px;
+    padding: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    min-height: 300px;
+}
+.card-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #2c3e50;
+    margin-bottom: 8px;
+}
+
+/* ─── Stock Detail ────────────────────────────────────────────────── */
+.stock-header {
+    font-size: clamp(20px, 4vw, 28px);
+    font-weight: 700;
+    margin-bottom: 16px;
+    color: #2c3e50;
+}
+
+.tab-bar {
+    display: flex;
+    gap: 2px;
+    border-bottom: 2px solid #ecf0f1;
+    margin-bottom: 16px;
+    overflow-x: auto;
+}
+.tab-btn {
+    padding: 10px 20px;
+    background: none;
+    border: none;
+    font-size: 13px;
+    font-weight: 500;
+    color: #7f8c8d;
+    cursor: pointer;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -2px;
+    white-space: nowrap;
+    transition: all 0.2s;
+}
+.tab-btn:hover { color: #2c3e50; }
+.tab-btn.active {
+    color: #3498db;
+    border-bottom-color: #3498db;
+}
+
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* ─── Financial Table ─────────────────────────────────────────────── */
+.fin-table-wrap {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    margin-bottom: 16px;
+}
+.fin-table-wrap table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+    white-space: nowrap;
+}
+.fin-table-wrap th,
+.fin-table-wrap td {
+    padding: 8px 12px;
+    text-align: right;
+    border-bottom: 1px solid #ecf0f1;
+}
+.fin-table-wrap th {
+    background: #f8f9fa;
+    font-weight: 600;
+    position: sticky;
+    top: 0;
+    color: #2c3e50;
+}
+.fin-table-wrap td:first-child,
+.fin-table-wrap th:first-child {
+    text-align: left;
+    position: sticky;
+    left: 0;
+    background: #fff;
+    z-index: 1;
+    min-width: 160px;
+}
+.fin-table-wrap th:first-child {
+    background: #f8f9fa;
+    z-index: 2;
+}
+.fin-table-wrap tr:hover td { background: #f8f9fa; }
+.fin-table-wrap tr:hover td:first-child { background: #f0f1f3; }
+.section-header td {
+    font-weight: 700 !important;
+    background: #eef0f5 !important;
+    color: #2c3e50;
+}
+
+.fin-freq-tabs {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+}
+.fin-freq-btn {
+    padding: 6px 16px;
+    border: 1px solid #ddd;
+    background: #fff;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    transition: all 0.2s;
+}
+.fin-freq-btn.active {
+    background: #3498db;
+    color: #fff;
+    border-color: #3498db;
+}
+
+/* ─── Plotly Chart Container ──────────────────────────────────────── */
+.chart-container {
+    width: 100%;
+    min-height: 300px;
+}
+
+/* ─── Responsive ──────────────────────────────────────────────────── */
+@media (max-width: 768px) {
+    #app { padding: 8px; }
+    .dashboard-grid { grid-template-columns: 1fr; }
+    .fed-status { padding: 12px 16px; }
+    .card { min-height: 250px; }
+    .tab-btn { padding: 8px 14px; font-size: 12px; }
+    .nav-btn { padding: 6px 10px; font-size: 12px; }
+}

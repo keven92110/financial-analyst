@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: financial-analyst
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: FRED_API_KEY
+        sync: false
+    plan: free
