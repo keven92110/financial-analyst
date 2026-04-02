@@ -1,8 +1,5 @@
-# Cache files
-eps_cache/
+# Cache files (keep eps_cache and rates_cache for deployment)
 eps_history/
-financials_cache/
-rates_cache/
 rates_history/
 __pycache__/
 *.pyc
