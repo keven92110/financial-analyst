@@ -1967,6 +1967,26 @@ class OptionStrategyTab(QWidget):
                        label=f'spot {S0:.0f}')
         for be in res.get('breakevens', []):
             ax_top.axvline(be, color='purple', lw=0.6, ls=':', alpha=0.7)
+
+        # ── Per-leg strike markers + labels (so user sees how the legs
+        #    decompose visually)
+        for leg in strat.legs:
+            leg_color = '#1a7e1a' if leg.side == 'short' else '#c0392b'
+            ax_top.axvline(leg.strike, color=leg_color, lw=0.8,
+                           ls='-.', alpha=0.45)
+            sign = '+L' if leg.side == 'long' else '-S'
+            typ = leg.type[0].upper()
+            ax_top.annotate(
+                f"{sign}{typ} {leg.strike:.0f}\n@ {leg.premium:.2f}",
+                xy=(leg.strike, 0),
+                xytext=(0, 14), textcoords='offset points',
+                fontsize=7, ha='center', va='bottom',
+                color=leg_color,
+                bbox=dict(boxstyle='round,pad=0.2',
+                          facecolor='white', edgecolor=leg_color,
+                          linewidth=0.6, alpha=0.85),
+            )
+
         # Distribution overlay on twin axis
         ax_top2 = ax_top.twinx()
         ax_top2.hist(S_T, bins=60, density=True, alpha=0.18,
@@ -1974,10 +1994,27 @@ class OptionStrategyTab(QWidget):
         ax_top2.set_ylabel('probability density', color='#4575b4', fontsize=9)
         ax_top2.tick_params(axis='y', labelcolor='#4575b4', labelsize=8)
         ax_top.set_ylabel('P&L per share')
+
+        # Two-line title: line 1 = strategy stats, line 2 = leg breakdown
+        leg_strs = []
+        for leg in strat.legs:
+            sign = '+L' if leg.side == 'long' else '-S'
+            typ = leg.type[0].upper()
+            leg_strs.append(f"{sign} {typ}{leg.strike:.0f} @ {leg.premium:.2f}")
+        cost = res['cost']
+        if abs(cost) < 0.01:
+            cost_label = '≈0'
+        elif cost < 0:
+            cost_label = 'credit'
+        else:
+            cost_label = 'debit'
+        legs_line = ('   |   '.join(leg_strs)
+                     + f"   →   net {cost:+.2f} ({cost_label})")
         ax_top.set_title(
             f"{res['name']}   PoP={res['pop']:.1f}%   "
-            f"max±=({res['max_gain']:+.1f}, {res['max_loss']:+.1f})",
-            fontsize=11
+            f"max±=({res['max_gain']:+.1f}, {res['max_loss']:+.1f})\n"
+            f"{legs_line}",
+            fontsize=10
         )
         ax_top.legend(loc='upper left', fontsize=8)
         ax_top.grid(alpha=0.25)
