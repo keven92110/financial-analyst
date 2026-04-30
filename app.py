@@ -1759,6 +1759,19 @@ class OptionStrategyTab(QWidget):
         # Auto re-run when sigma changes (uses cached today_data so it's fast)
         self.sigma_spin.valueChanged.connect(self._on_sigma_change)
         head.addWidget(self.sigma_spin)
+        # Compare-with range — second histogram overlaid on payoff chart
+        head.addWidget(QLabel('Compare:'))
+        self.compare_combo = QComboBox()
+        for lbl in ['6M', '12M', '2Y', '5Y', '10Y', '20Y']:
+            self.compare_combo.addItem(lbl, lbl)
+        self.compare_combo.setCurrentText('12M')
+        self.compare_combo.setToolTip(
+            'Background distribution shows two histograms:\n'
+            '  • Full history (faint)\n'
+            '  • Selected range (solid)'
+        )
+        self.compare_combo.currentIndexChanged.connect(self._on_compare_change)
+        head.addWidget(self.compare_combo)
         self.btn_run = QPushButton('Find strategies')
         self.btn_run.clicked.connect(self._run)
         head.addWidget(self.btn_run)
@@ -1819,6 +1832,21 @@ class OptionStrategyTab(QWidget):
         self.worker.finished.connect(self._on_done)
         self.worker.error.connect(self._on_error)
         self.worker.start()
+
+    def _on_compare_change(self):
+        """Cheap re-draw — just re-render the currently selected strategy
+        with the new comparison range. No data fetch, no strategy re-search."""
+        if self._result is None:
+            return
+        rows = self.table.selectionModel().selectedRows()
+        if not rows:
+            return
+        item = self.table.item(rows[0].row(), 0)
+        if item is None:
+            return
+        res = item.data(Qt.UserRole)
+        if res is not None:
+            self._draw_payoff(res)
 
     def _on_sigma_change(self):
         """Cheap re-run: reuse cached today_data (no yfinance fetch) and
@@ -2022,56 +2050,49 @@ class OptionStrategyTab(QWidget):
                           linewidth=0.7, alpha=0.9),
             )
 
-        # ── Per-range distribution overlay on twin axis (same colour scheme
-        #    as Today / Backtest tabs: recent ranges opaque, older transparent)
+        # ── Background distribution: two PMF histograms in light blue
+        # Full = faint (background); selected compare-range = solid (foreground)
         ax_top2 = ax_top.twinx()
         range_dists = self._result.get('range_dists', {}) if self._result else {}
         horizon_key = self._result.get('horizon_key', 'fwd_20d') if self._result else 'fwd_20d'
+        compare_range = self.compare_combo.currentData() or '12M'
 
         bins = np.linspace(s_lo, s_hi, 50)
         centers = (bins[:-1] + bins[1:]) / 2
-        # Same palette / alphas used elsewhere in the app
-        R_LABELS = ['6M', '12M', '2Y', '5Y', '10Y', '20Y', 'Full']
-        R_COLORS = ['#d73027', '#fc8d59', '#fdae61', '#a6d96a',
-                    '#66bd63', '#1a9850', '#2c3e50']
-        R_ALPHAS = [1.00, 0.92, 0.82, 0.72, 0.60, 0.48, 0.40]
-        R_LWS    = [1.6,  1.5,  1.4,  1.3,  1.2,  1.1,  1.2]
+        BLUE = '#4575b4'
 
-        plotted_any = False
-        for i, lbl in enumerate(R_LABELS):
-            rd = range_dists.get(lbl, {}).get(horizon_key, {})
+        def _plot_range_pmf(label, line_alpha, fill_alpha, lw):
+            rd = range_dists.get(label, {}).get(horizon_key, {})
             vals = rd.get('vals')
             if vals is None or len(vals) == 0:
-                continue
-            n = len(vals)
+                return False
             range_S_T = S0 * np.exp(np.asarray(vals))
             counts, _ = np.histogram(range_S_T, bins=bins)
-            if counts.sum() == 0:
-                continue
+            if counts.sum() == 0: return False
             pmf = counts / counts.sum()
-            ax_top2.plot(centers, pmf,
-                         color=R_COLORS[i], lw=R_LWS[i],
-                         alpha=R_ALPHAS[i],
-                         drawstyle='steps-mid',
-                         label=f'{lbl} (N={n:,})')
-            ax_top2.fill_between(centers, 0, pmf,
-                                 color=R_COLORS[i],
-                                 alpha=R_ALPHAS[i] * 0.12,
-                                 step='mid')
-            plotted_any = True
+            ax_top2.plot(centers, pmf, color=BLUE, lw=lw,
+                         alpha=line_alpha, drawstyle='steps-mid',
+                         label=f'{label} (N={len(vals):,})')
+            ax_top2.fill_between(centers, 0, pmf, color=BLUE,
+                                 alpha=fill_alpha, step='mid')
+            return True
 
-        if not plotted_any:
-            # Fallback: single hist of all S_T (e.g. range_dists empty)
+        plotted_full = _plot_range_pmf('Full', line_alpha=0.30,
+                                       fill_alpha=0.06, lw=1.0)
+        plotted_sel = False
+        if compare_range != 'Full':
+            plotted_sel = _plot_range_pmf(compare_range, line_alpha=1.00,
+                                          fill_alpha=0.22, lw=1.8)
+        if not plotted_full and not plotted_sel:
+            # Fallback when range_dists isn't available
             ax_top2.hist(S_T, bins=60, density=True, alpha=0.18,
-                         color='#4575b4', edgecolor='none')
+                         color=BLUE, edgecolor='none')
 
-        ax_top2.set_ylabel('probability per range', fontsize=8, color='#444')
-        ax_top2.tick_params(axis='y', labelsize=7, colors='#444')
-        if plotted_any:
-            ax_top2.legend(loc='upper right', fontsize=7,
-                           framealpha=0.85, ncol=2,
-                           title='trailing range',
-                           title_fontsize=7)
+        ax_top2.set_ylabel('probability', fontsize=8, color='#666')
+        ax_top2.tick_params(axis='y', labelsize=7, colors='#666')
+        if plotted_full or plotted_sel:
+            ax_top2.legend(loc='upper right', fontsize=8,
+                           framealpha=0.85)
         ax_top.set_ylabel('P&L per share')
 
         # Two-line title: line 1 = strategy stats, line 2 = leg breakdown
