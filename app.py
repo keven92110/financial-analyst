@@ -28,7 +28,8 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QGridLayout, QStackedWidget, QComboBox, QPushButton, QLabel,
     QTableWidget, QTableWidgetItem, QScrollArea, QFrame, QStatusBar,
-    QHeaderView, QSplitter, QGroupBox, QSizePolicy, QTabWidget
+    QHeaderView, QSplitter, QGroupBox, QSizePolicy, QTabWidget,
+    QDoubleSpinBox
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import QFont, QColor, QPalette
@@ -763,6 +764,1225 @@ class DashboardPage(QWidget):
             print(f"Dashboard: gold error: {e}")
 
 
+# ─── Market Windows Page ──────────────────────────────────────────────
+#
+# Two sub-tabs:
+#   - 今日訊號  (today's classification + historical fwd 5d/20d distribution)
+#   - 歷史回測  (user picks method/category/index/horizon → 7-panel grid)
+#
+# Backend modules live under research/. We import them lazily to avoid
+# circular issues during app startup.
+
+class _MarketWorker(QThread):
+    finished = pyqtSignal(dict)
+    error = pyqtSignal(str)
+
+    def __init__(self, refresh: bool = False):
+        super().__init__()
+        self.refresh = refresh
+
+    def run(self):
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'research'))
+            import predict
+            predict.reset_caches()
+            data = predict.get_today_signals(refresh=self.refresh)
+            self.finished.emit(data)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            self.error.emit(str(e))
+
+
+class KMeansReferenceWidget(QWidget):
+    """Compact reference panel showing the 6 K-means cluster mean paths.
+
+    Today's cluster is drawn bold; others are faded. Used in TodaySignalsTab
+    so users can visually compare today's window against the canonical
+    cluster shapes.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(2, 2, 2, 2)
+        layout.setSpacing(2)
+        title = QLabel("<b>K-means reference</b>")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("font-size: 9pt;")
+        layout.addWidget(title)
+
+        self.canvas = MplCanvas(self, width=3.0, height=4.0, dpi=90)
+        layout.addWidget(self.canvas)
+        self.setMaximumWidth(360)
+        self.setMinimumWidth(280)
+
+        self.cluster_paths = None  # dict[str -> np.ndarray(30,)]
+        self.cluster_meta = None   # dict[str -> dict(N, win_pct)]
+        self.highlighted = None
+        self._loaded = False
+
+    def ensure_loaded(self):
+        if self._loaded:
+            return
+        try:
+            sys.path.insert(0,
+                os.path.join(os.path.dirname(__file__), 'research'))
+            import predict
+            panel = predict.load_panel()
+        except Exception as e:
+            print(f'KMeansReferenceWidget load error: {e}')
+            return
+        path_cols = [f'p{i}' for i in range(30)]
+        self.cluster_paths = {}
+        self.cluster_meta = {}
+        clusters = sorted(panel['cat_c'].dropna().unique(),
+                          key=lambda x: int(x[1:]))
+        for cl in clusters:
+            sub = panel[panel['cat_c'] == cl]
+            self.cluster_paths[cl] = sub[path_cols].mean().values
+            self.cluster_meta[cl] = {
+                'n': len(sub),
+                'win_pct': float(sub['window_ret'].mean() * 100),
+            }
+        self._loaded = True
+        self._redraw()
+
+    def highlight(self, cluster_label):
+        """Highlight one cluster (e.g. 'C4'). None = no highlight."""
+        self.highlighted = cluster_label
+        if self._loaded:
+            self._redraw()
+
+    def _redraw(self):
+        if not self.cluster_paths:
+            return
+        self.canvas.clear()
+        ax = self.canvas.ax
+        cmap = plt.get_cmap('RdYlGn')
+        n = len(self.cluster_paths)
+        for i, (cl, path) in enumerate(self.cluster_paths.items()):
+            color = cmap(i / max(1, n - 1))
+            is_today = (cl == self.highlighted)
+            lw = 3.0 if is_today else 1.2
+            alpha = 1.0 if is_today else 0.45
+            meta = self.cluster_meta.get(cl, {})
+            label = f'{cl}  win {meta.get("win_pct", 0):+.0f}%'
+            if is_today:
+                label += '  ←TODAY'
+            ax.plot(range(30), path, color=color, lw=lw, alpha=alpha,
+                    label=label)
+        ax.axhline(1.0, color='gray', lw=0.4, ls=':')
+        ax.set_xlabel('day', fontsize=8)
+        ax.set_ylabel('rel. price', fontsize=8)
+        ax.legend(fontsize=7, loc='upper left', framealpha=0.85)
+        ax.tick_params(labelsize=7)
+        ax.grid(alpha=0.25)
+        self.canvas.fig.tight_layout()
+        self.canvas.draw()
+
+
+class _RetrainWorker(QThread):
+    """Background worker that re-runs research/run.py to refit K-means
+    and rebuild the historical window panel."""
+    finished = pyqtSignal(str)   # path to new bundle
+    error = pyqtSignal(str)
+    progress = pyqtSignal(str)
+
+    def run(self):
+        try:
+            import subprocess
+            self.progress.emit('Retraining models (this takes ~1-2 min)...')
+            research_dir = os.path.join(os.path.dirname(__file__), 'research')
+            result = subprocess.run(
+                [sys.executable, 'run.py'],
+                cwd=research_dir,
+                capture_output=True, text=True, timeout=600
+            )
+            if result.returncode != 0:
+                self.error.emit(f'run.py failed:\n{result.stderr[-2000:]}')
+                return
+            # Reset caches in predict so new bundle is picked up
+            sys.path.insert(0, research_dir)
+            import predict
+            predict.reset_caches()
+            self.finished.emit('OK')
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.error.emit(str(e))
+
+
+class TodaySignalsTab(QWidget):
+    """Single-screen view: pick an index, see today's classification by all
+    three methods overlaid on shared-x fwd_5d / fwd_20d distributions, with
+    a K-means cluster reference panel on the right."""
+
+    METHOD_LABELS = {
+        'cat_b': 'B · Shape',
+        'cat_c': 'C · K-means',
+        'cat_d': 'D · RSI',
+    }
+    # 7 trailing-range overlay colors / alphas / line widths (same as Backtest)
+    RANGE_LABELS = ['6M', '12M', '2Y', '5Y', '10Y', '20Y', 'Full']
+    RANGE_COLORS = ['#d73027', '#fc8d59', '#fdae61', '#a6d96a',
+                    '#66bd63', '#1a9850', '#2c3e50']
+    RANGE_ALPHAS = [1.00, 0.92, 0.82, 0.72, 0.60, 0.48, 0.40]
+    RANGE_LWS    = [2.4,  2.2,  2.0,  1.8,  1.6,  1.4,  1.6]
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+
+        # ── Header row 1: as_of + dropdowns + buttons
+        head1 = QHBoxLayout()
+        self.as_of_label = QLabel("As of: --  (loading...)")
+        self.as_of_label.setFont(QFont('Arial', 10))
+        head1.addWidget(self.as_of_label)
+        self.model_age_label = QLabel("")
+        self.model_age_label.setFont(QFont('Arial', 9))
+        self.model_age_label.setStyleSheet("color: #888;")
+        head1.addWidget(self.model_age_label)
+        head1.addStretch()
+        head1.addWidget(QLabel("Index:"))
+        self.idx_combo = QComboBox()
+        for i in ['ALL_5IDX', 'DJI', 'NDX', 'SOX', 'SPX', 'RUT', 'TWII']:
+            self.idx_combo.addItem(i, i)
+        self.idx_combo.setCurrentText('ALL_5IDX')
+        self.idx_combo.currentIndexChanged.connect(self._on_view_change)
+        head1.addWidget(self.idx_combo)
+        head1.addWidget(QLabel("Method:"))
+        self.method_combo = QComboBox()
+        self.method_combo.addItem('B · Shape', 'cat_b')
+        self.method_combo.addItem('C · K-means', 'cat_c')
+        self.method_combo.addItem('D · RSI', 'cat_d')
+        # Default to D (RSI) — short-term mean reversion is the most actionable
+        self.method_combo.setCurrentIndex(2)
+        self.method_combo.currentIndexChanged.connect(self._on_view_change)
+        head1.addWidget(self.method_combo)
+        self.btn_reload = QPushButton("Refresh data")
+        self.btn_reload.clicked.connect(lambda: self.reload(refresh=True))
+        head1.addWidget(self.btn_reload)
+        self.btn_retrain = QPushButton("Retrain K-means")
+        self.btn_retrain.setToolTip(
+            "Re-runs research/run.py to refit K-means and rebuild the "
+            "historical window panel using all data through today.\n"
+            "Takes ~1-2 minutes."
+        )
+        self.btn_retrain.clicked.connect(self._on_retrain)
+        head1.addWidget(self.btn_retrain)
+        outer.addLayout(head1)
+        self._update_model_age()
+
+        # ── Header row 2: today's classifications
+        self.classif_label = QLabel("Today's classification will appear here.")
+        self.classif_label.setStyleSheet(
+            "padding: 4px 8px; background:#fafbfc; border:1px solid #e0e0e0; "
+            "border-radius:4px; font-size: 10pt;")
+        self.classif_label.setWordWrap(True)
+        outer.addWidget(self.classif_label)
+
+        # ── Body: charts (left) + K-means reference (right)
+        body = QHBoxLayout()
+        body.setSpacing(6)
+
+        # Left: stacked 5d/20d charts on a single Figure (sharex)
+        chart_holder = QWidget()
+        ch_layout = QVBoxLayout(chart_holder)
+        ch_layout.setContentsMargins(0, 0, 0, 0)
+        self.chart_canvas = MplCanvas(self, width=10, height=7, dpi=100)
+        ch_layout.addWidget(self.chart_canvas)
+        body.addWidget(chart_holder, stretch=4)
+
+        # Right: K-means reference (compact)
+        self.kmeans_ref = KMeansReferenceWidget()
+        body.addWidget(self.kmeans_ref, stretch=1)
+
+        outer.addLayout(body, stretch=1)
+
+        self.worker = None
+        self._data = None
+        self._loaded = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded = True
+            self.kmeans_ref.ensure_loaded()
+            self.reload(refresh=False)
+
+    # ── Model-age / retrain plumbing
+    def _update_model_age(self):
+        try:
+            from datetime import datetime
+            bundle_path = os.path.join(
+                os.path.dirname(__file__),
+                'research', 'models', 'classifier_bundle.pkl')
+            if not os.path.exists(bundle_path):
+                self.model_age_label.setText("·  K-means: not trained")
+                return
+            mtime = datetime.fromtimestamp(os.path.getmtime(bundle_path))
+            age_days = (datetime.now() - mtime).days
+            tag = "" if age_days < 30 else " (consider retrain)"
+            self.model_age_label.setText(
+                f"·  K-means trained {mtime:%Y-%m-%d} ({age_days}d ago){tag}"
+            )
+        except Exception:
+            self.model_age_label.setText("")
+
+    def _on_retrain(self):
+        self.btn_retrain.setEnabled(False)
+        self.btn_reload.setEnabled(False)
+        self.model_age_label.setText("·  Retraining models...")
+        self._retrain_worker = _RetrainWorker()
+        self._retrain_worker.progress.connect(
+            lambda msg: self.model_age_label.setText('·  ' + msg)
+        )
+        self._retrain_worker.error.connect(self._on_retrain_error)
+        self._retrain_worker.finished.connect(self._on_retrain_done)
+        self._retrain_worker.start()
+
+    def _on_retrain_error(self, msg: str):
+        self.btn_retrain.setEnabled(True)
+        self.btn_reload.setEnabled(True)
+        self.model_age_label.setText(f"·  Retrain failed: {msg[:100]}")
+
+    def _on_retrain_done(self, _: str):
+        self.btn_retrain.setEnabled(True)
+        self.btn_reload.setEnabled(True)
+        self._update_model_age()
+        # Re-fetch today's signals AND refresh K-means reference
+        self.kmeans_ref._loaded = False
+        self.kmeans_ref.ensure_loaded()
+        self.reload(refresh=False)
+
+    # ── Data fetch / render
+    def reload(self, refresh: bool = False):
+        self.btn_reload.setEnabled(False)
+        self.classif_label.setText("Loading today's signals...")
+        self.chart_canvas.clear()
+        self.chart_canvas.draw()
+
+        self.worker = _MarketWorker(refresh=refresh)
+        self.worker.finished.connect(self._on_data)
+        self.worker.error.connect(self._on_error)
+        self.worker.start()
+
+    def _on_error(self, msg: str):
+        self.btn_reload.setEnabled(True)
+        self.classif_label.setText(
+            f"<span style='color:#c0392b'>Error loading data: {msg}</span>")
+
+    def _on_data(self, data: dict):
+        self.btn_reload.setEnabled(True)
+        self._data = data
+        as_of = data.get('as_of_date')
+        last_per_idx = data.get('last_date_per_index', {})
+        as_of_str = as_of.strftime('%Y-%m-%d') if as_of is not None else '--'
+        per_idx_str = ', '.join(f"{k}={v.strftime('%m-%d')}"
+                                for k, v in last_per_idx.items())
+        self.as_of_label.setText(
+            f"As of: {as_of_str}  (per-index latest: {per_idx_str})")
+        self._render_for_view()
+
+    def _on_view_change(self):
+        if self._data is None:
+            return
+        self._render_for_view()
+
+    def _render_for_view(self):
+        """Render charts for the currently selected (Index, Method).
+        Uses cached today_data; no network fetch."""
+        data = self._data
+        if data is None:
+            return
+        idx_name = self.idx_combo.currentData() or 'ALL_5IDX'
+        method = self.method_combo.currentData() or 'cat_d'
+
+        entry = data['indices'].get(idx_name)
+        if entry is None:
+            self.classif_label.setText(f"<i>No data for {idx_name}.</i>")
+            self.chart_canvas.clear(); self.chart_canvas.draw()
+            return
+
+        cls = entry.get('classification')   # None for ALL_5IDX
+
+        # K-means reference always tracks today's C cluster of the selected
+        # index, regardless of which method is plotted.
+        cat_c_for_highlight = None
+        if cls is not None:
+            cat_c_for_highlight = cls.get('cat_c')
+        self.kmeans_ref.highlight(cat_c_for_highlight)
+
+        # Compute today's category for the selected method, plus per-range
+        # historical fwd_5d/20d distributions
+        try:
+            sys.path.insert(0,
+                os.path.join(os.path.dirname(__file__), 'research'))
+            import predict
+        except Exception as e:
+            self.classif_label.setText(f"<span style='color:#c0392b'>Import error: {e}</span>")
+            return
+        try:
+            distributions, today_cat = predict.get_today_distributions_by_range(
+                method, idx_name, data
+            )
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.classif_label.setText(
+                f"<span style='color:#c0392b'>Lookup error: {e}</span>")
+            return
+
+        # Header label
+        if cls is not None:
+            head_text = (f'<b>{idx_name}</b>  ·  30d {cls["window_ret_pct"]:+.2f}%  '
+                         f'·  vol(yr) {cls["window_vol_pct"]:.1f}%  '
+                         f'·  RSI14 {cls["rsi14"]:.1f}'
+                         f'  ·  window {cls["dates"][0].strftime("%m/%d")}–'
+                         f'{cls["dates"][-1].strftime("%m/%d")}')
+        else:
+            head_text = f'<b>{idx_name}</b>  ·  combined view (5 indices, pooled)'
+
+        cat_disp = today_cat or '—'
+        if len(cat_disp) > 90:
+            cat_disp = cat_disp[:87] + '...'
+        method_label = self.METHOD_LABELS[method]
+        cat_html = (f"<span style='font-size:11pt'>"
+                    f"<b>Today's {method_label}:</b> "
+                    f"<span style='color:#c0392b'>{cat_disp}</span>"
+                    f"</span>")
+        self.classif_label.setText(head_text + '<br>' + cat_html)
+
+        # Draw 7-range overlay charts
+        self._draw_range_overlay(distributions, idx_name, method, today_cat)
+
+    def _draw_range_overlay(self, distributions: dict, idx_name: str,
+                            method: str, today_cat):
+        """fwd_5d on top, fwd_20d on bottom, shared x-axis;
+        overlay 7 trailing ranges (recent=warm, older=cool)."""
+        fig = self.chart_canvas.fig
+        fig.clear()
+        ax5 = fig.add_subplot(2, 1, 1)
+        ax20 = fig.add_subplot(2, 1, 2, sharex=ax5)
+
+        # Determine common x-range across BOTH horizons & all 7 ranges
+        all_vals = []
+        for label in self.RANGE_LABELS:
+            stats = distributions.get(label, {})
+            for hkey in ('fwd_5d', 'fwd_20d'):
+                v = stats.get(hkey, {}).get('vals')
+                if v is not None and len(v):
+                    all_vals.append(v)
+        if all_vals:
+            comb = np.concatenate(all_vals) * 100
+            xlo = np.percentile(comb, 0.5)
+            xhi = np.percentile(comb, 99.5)
+            span = max(abs(xlo), abs(xhi))
+            xlo, xhi = -span, span
+        else:
+            xlo, xhi = -10, 10
+
+        n_bins = 45
+        edges = np.linspace(xlo, xhi, n_bins + 1)
+        centers = (edges[:-1] + edges[1:]) / 2
+
+        for ax, hkey, title in ((ax5, 'fwd_5d', 'Forward 5-day return  (probability)'),
+                                (ax20, 'fwd_20d', 'Forward 20-day return  (probability)')):
+            plotted = 0
+            for i, label in enumerate(self.RANGE_LABELS):
+                stats = distributions.get(label, {}).get(hkey, {})
+                vals = stats.get('vals')
+                n = stats.get('n', 0)
+                if vals is None or len(vals) == 0:
+                    continue
+                arr = vals * 100
+                counts, _ = np.histogram(arr, bins=edges)
+                if counts.sum() == 0:
+                    continue
+                pmf = counts / counts.sum()
+                warn = ' ⚠️' if 0 < n < 30 else ''
+                leg = (f'{label:>4s}{warn}  N={n:>5,}  '
+                       f'μ={stats["mean_pct"]:+.2f}%  '
+                       f'hit={stats["hit_rate"]:.0f}%')
+                ax.plot(centers, pmf, color=self.RANGE_COLORS[i],
+                        lw=self.RANGE_LWS[i], alpha=self.RANGE_ALPHAS[i],
+                        label=leg, drawstyle='steps-mid')
+                ax.fill_between(centers, 0, pmf, color=self.RANGE_COLORS[i],
+                                alpha=self.RANGE_ALPHAS[i] * 0.15, step='mid')
+                plotted += 1
+            ax.axvline(0, color='gray', lw=0.7, ls=':')
+            ax.set_ylabel('probability', fontsize=10)
+            ax.tick_params(labelsize=8)
+            ax.grid(alpha=0.25)
+            if plotted:
+                ax.legend(loc='upper right', fontsize=8, framealpha=0.92,
+                          title='trailing range  (warm=recent, cool=older)',
+                          title_fontsize=8)
+            else:
+                ax.text(0.5, 0.5, 'No matching historical windows.',
+                        ha='center', va='center',
+                        transform=ax.transAxes, color='#888')
+            ax.set_title(title, fontsize=10, loc='left')
+
+        ax5.tick_params(axis='x', labelbottom=False)
+        ax20.set_xlabel('forward return (%)', fontsize=10)
+        # Big overall title with what's being plotted
+        cat_disp = (today_cat or '—')
+        if len(cat_disp) > 60:
+            cat_disp = cat_disp[:57] + '...'
+        fig.suptitle(
+            f'{idx_name}  ·  {self.METHOD_LABELS[method]}  ·  '
+            f'today = {cat_disp}',
+            fontsize=11, y=0.995
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        self.chart_canvas.draw()
+
+
+class BacktestTab(QWidget):
+    """User-driven backtest viewer with 7 trailing windows."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+
+        # Top control bar
+        ctrl = QHBoxLayout()
+
+        ctrl.addWidget(QLabel('Method:'))
+        self.method_combo = QComboBox()
+        self.method_combo.addItem('B · Shape', 'cat_b')
+        self.method_combo.addItem('C · K-means', 'cat_c')
+        self.method_combo.addItem('D · RSI', 'cat_d')
+        self.method_combo.currentIndexChanged.connect(self._refresh_categories)
+        ctrl.addWidget(self.method_combo)
+
+        ctrl.addWidget(QLabel('Category:'))
+        self.cat_combo = QComboBox()
+        ctrl.addWidget(self.cat_combo)
+
+        ctrl.addWidget(QLabel('Index:'))
+        self.idx_combo = QComboBox()
+        for i in ['ALL_5IDX', 'SPX', 'DJI', 'NDX', 'RUT', 'SOX', 'TWII']:
+            self.idx_combo.addItem(i, i)
+        self.idx_combo.currentIndexChanged.connect(self._refresh_categories)
+        ctrl.addWidget(self.idx_combo)
+
+        ctrl.addWidget(QLabel('Horizon:'))
+        self.horizon_combo = QComboBox()
+        self.horizon_combo.addItem('5d', 'fwd_5d')
+        self.horizon_combo.addItem('20d', 'fwd_20d')
+        ctrl.addWidget(self.horizon_combo)
+
+        self.btn_run = QPushButton('Plot')
+        self.btn_run.clicked.connect(self._run)
+        ctrl.addWidget(self.btn_run)
+        ctrl.addStretch()
+        outer.addLayout(ctrl)
+
+        # Plot area
+        self.canvas = MplCanvas(self, width=12, height=7, dpi=100)
+        outer.addWidget(self.canvas, stretch=1)
+
+        self.status_label = QLabel('')
+        self.status_label.setStyleSheet('color: #888; font-size: 9pt;')
+        outer.addWidget(self.status_label)
+
+        # Init
+        self._loaded = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded = True
+            self._refresh_categories()
+            self._run()
+
+    def _refresh_categories(self):
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'research'))
+            import predict
+        except Exception as e:
+            return
+        method = self.method_combo.currentData()
+        idx = self.idx_combo.currentData()
+        try:
+            panel = predict.load_panel()
+            cats = predict.get_categories_for_method(panel, method,
+                                                     index_name=idx)
+        except Exception as e:
+            cats = []
+        prev = self.cat_combo.currentText()
+        self.cat_combo.clear()
+        self.cat_combo.addItems(cats)
+        if prev in cats:
+            self.cat_combo.setCurrentText(prev)
+
+    def _run(self):
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'research'))
+            import predict
+        except Exception as e:
+            self.status_label.setText(f'Import error: {e}')
+            return
+        method = self.method_combo.currentData()
+        cat = self.cat_combo.currentText()
+        idx = self.idx_combo.currentData()
+        horizon = self.horizon_combo.currentData()
+        if not cat:
+            self.status_label.setText('No category selected.')
+            return
+        try:
+            data = predict.get_backtest_distributions(method, cat, idx, horizon)
+        except Exception as e:
+            self.status_label.setText(f'Error: {e}')
+            return
+        self._plot(data, method, cat, idx, horizon)
+
+    def _plot(self, data: dict, method: str, cat: str,
+              idx: str, horizon: str):
+        """All time-ranges overlaid as PMF curves (sum to 1).
+
+        Older ranges are more transparent so the recent ones stand out.
+        """
+        self.canvas.fig.clear()
+        ax = self.canvas.fig.add_subplot(111)
+
+        labels = ['6M', '12M', '2Y', '5Y', '10Y', '20Y', 'Full']
+        # Color: warm (red/orange) = recent → cool (blue) = old
+        cmap = ['#d73027', '#fc8d59', '#fdae61', '#a6d96a',
+                '#66bd63', '#1a9850', '#2c3e50']
+        # Transparency: recent = solid, old = lighter
+        alphas = [1.00, 0.92, 0.82, 0.72, 0.60, 0.48, 0.40]
+        # Line widths: recent thicker, old thinner
+        lws = [2.4, 2.2, 2.0, 1.8, 1.6, 1.4, 1.6]
+
+        # Common x-range (1–99 percentile of all combined data)
+        all_vals = []
+        for lbl in labels:
+            v = data.get(lbl, {}).get('vals')
+            if v is not None and len(v):
+                all_vals.append(v)
+        if all_vals:
+            comb = np.concatenate(all_vals) * 100
+            xmin = np.percentile(comb, 0.5)
+            xmax = np.percentile(comb, 99.5)
+            # Symmetrize a bit so 0 doesn't sit at edge
+            span = max(abs(xmin), abs(xmax))
+            xmin, xmax = -span, span
+        else:
+            xmin, xmax = -5, 5
+
+        n_bins = 40
+        edges = np.linspace(xmin, xmax, n_bins + 1)
+        centers = (edges[:-1] + edges[1:]) / 2
+
+        plotted = 0
+        for i, lbl in enumerate(labels):
+            stats = data.get(lbl, {})
+            vals = stats.get('vals')
+            n = stats.get('n', 0)
+            if vals is None or len(vals) == 0:
+                continue
+            arr = vals * 100
+            counts, _ = np.histogram(arr, bins=edges)
+            pmf = counts / counts.sum()  # probabilities sum to 1
+
+            warn = ' ⚠️' if 0 < n < 30 else ''
+            label = (f'{lbl:>4s}{warn}  N={n:>5,}  '
+                     f'μ={stats["mean_pct"]:+.2f}%  '
+                     f'hit={stats["hit_rate"]:.0f}%')
+
+            ax.plot(centers, pmf,
+                    color=cmap[i], lw=lws[i], alpha=alphas[i],
+                    label=label, drawstyle='steps-mid')
+            ax.fill_between(centers, 0, pmf, color=cmap[i],
+                            alpha=alphas[i] * 0.15, step='mid')
+            plotted += 1
+
+        ax.axvline(0, color='gray', lw=0.8, ls='--', alpha=0.6)
+        ax.set_xlabel(f'fwd {horizon.replace("fwd_", "")} return (%)',
+                      fontsize=11)
+        ax.set_ylabel('Probability  (sum = 1)', fontsize=11)
+        ax.tick_params(labelsize=9)
+        ax.grid(alpha=0.25)
+        ax.legend(loc='upper right', fontsize=9, framealpha=0.92,
+                  title='trailing range  (recent = warm, older = cooler)',
+                  title_fontsize=9)
+
+        title = f'{method.upper()} · {cat}   ·   index = {idx}   ·   horizon = {horizon}'
+        ax.set_title(title, fontsize=12, pad=12)
+        self.canvas.fig.tight_layout()
+        self.canvas.draw()
+        self.status_label.setText(
+            f'Plotted {plotted}/7 ranges · {method.upper()} · {cat} · {idx} · {horizon}'
+        )
+
+
+class _IVWorker(QThread):
+    """Background worker that fetches today's IV (CBOE vol indices) and
+    today's σ_emp from our model, then builds a comparison table."""
+    finished = pyqtSignal(object, dict)   # (DataFrame, today_data)
+    error = pyqtSignal(str)
+
+    def run(self):
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'research'))
+            import predict
+            from iv import iv_compare
+            predict.reset_caches()
+            today_data = predict.get_today_signals()
+            df = iv_compare.compare_today(today_data)
+            self.finished.emit(df, today_data)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.error.emit(str(e))
+
+
+class IVComparisonTab(QWidget):
+    """Tab showing market IV (CBOE vol indices) vs our model's σ_emp.
+
+    Useful for spotting potential variance risk premium (VRP) opportunities,
+    though the historical backtest shows our σ does NOT meaningfully filter
+    'good days' to sell vol — the broad VIX-vs-RV pattern dominates.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+
+        # Header
+        head = QHBoxLayout()
+        title = QLabel("<b>IV vs Empirical σ Comparison</b>")
+        title.setStyleSheet("font-size: 12pt;")
+        head.addWidget(title)
+        head.addStretch()
+        self.btn_reload = QPushButton("Refresh")
+        self.btn_reload.clicked.connect(self.reload)
+        head.addWidget(self.btn_reload)
+        outer.addLayout(head)
+
+        # Status / explanation
+        explain = QLabel(
+            "<i>VRP = market IV − our σ_emp.  "
+            "Positive VRP suggests market is pricing more vol than our historical "
+            "RSI-bucket distribution.  σ_emp uses cat_d (RSI) full-history match "
+            "and is annualized.  Note: VIX historically captures realized vol "
+            "much better than our σ_emp (correlation 0.71 vs 0.27), so this is "
+            "informational rather than a clear edge signal.</i>"
+        )
+        explain.setWordWrap(True)
+        explain.setStyleSheet("color: #555; font-size: 9pt; padding: 4px;")
+        outer.addWidget(explain)
+
+        # Table
+        self.table = QTableWidget()
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setAlternatingRowColors(True)
+        outer.addWidget(self.table, stretch=1)
+
+        # Status line
+        self.status_label = QLabel("")
+        self.status_label.setStyleSheet("color: #888; font-size: 9pt;")
+        outer.addWidget(self.status_label)
+
+        self._loaded = False
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded = True
+            self.reload()
+
+    def reload(self):
+        self.btn_reload.setEnabled(False)
+        self.status_label.setText("Loading IV data...")
+        self.worker = _IVWorker()
+        self.worker.finished.connect(self._render)
+        self.worker.error.connect(self._on_error)
+        self.worker.start()
+
+    def _on_error(self, msg: str):
+        self.btn_reload.setEnabled(True)
+        self.status_label.setText(f"Error: {msg}")
+
+    def _render(self, df, today_data):
+        self.btn_reload.setEnabled(True)
+        as_of = today_data.get('as_of_date')
+        as_of_str = as_of.strftime('%Y-%m-%d') if as_of is not None else '--'
+
+        cols = ['Index', "Today's RSI bucket",
+                'σ_emp 5d (ann %)', 'IV 9d (%)', 'VRP 5d (%)',
+                'σ_emp 20d (ann %)', 'IV 30d (%)', 'VRP 20d (%)',
+                'N (5d / 20d)']
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        self.table.setRowCount(len(df))
+        for r in range(len(df)):
+            row = df.iloc[r]
+            def make_item(text, color=None, bold=False, align_right=True):
+                it = QTableWidgetItem(text)
+                if align_right:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                else:
+                    it.setTextAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+                if color:
+                    it.setForeground(QColor(color))
+                if bold:
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                return it
+
+            self.table.setItem(r, 0, make_item(row['index'], bold=True, align_right=False))
+            self.table.setItem(r, 1, make_item(str(row['cat_d']), align_right=False))
+            self.table.setItem(r, 2, make_item(_fmt_pct(row['sigma_emp_5d_pct'])))
+            self.table.setItem(r, 3, make_item(_fmt_pct(row['iv_9d_pct'])))
+            self.table.setItem(r, 4, make_item(_fmt_pct(row['vrp_5d_pct'], signed=True),
+                                                color=_vrp_color(row['vrp_5d_pct'])))
+            self.table.setItem(r, 5, make_item(_fmt_pct(row['sigma_emp_20d_pct'])))
+            self.table.setItem(r, 6, make_item(_fmt_pct(row['iv_30d_pct'])))
+            self.table.setItem(r, 7, make_item(_fmt_pct(row['vrp_20d_pct'], signed=True),
+                                                color=_vrp_color(row['vrp_20d_pct'])))
+            n_str = f"{int(row['n_5d']):,} / {int(row['n_20d']):,}"
+            self.table.setItem(r, 8, make_item(n_str, align_right=False))
+        self.table.resizeColumnsToContents()
+
+        # Status / summary line
+        valid_vrp_20 = df['vrp_20d_pct'].dropna()
+        if len(valid_vrp_20):
+            mean_vrp = valid_vrp_20.mean()
+            sign = "MORE" if mean_vrp > 0 else "LESS"
+            self.status_label.setText(
+                f"As of: {as_of_str}    Mean VRP_20d (where IV available) = "
+                f"{mean_vrp:+.2f}%  →  market expects {sign} vol than our model on average. "
+                f"Historical mean VRP (VIX-RV) ≈ +3.8%.  "
+                f"RUT/SOX have no CBOE vol-index in yfinance, IV shown as --."
+            )
+        else:
+            self.status_label.setText(f"As of: {as_of_str}")
+
+
+def _fmt_pct(v, signed=False) -> str:
+    try:
+        if v is None or (isinstance(v, float) and np.isnan(v)):
+            return '--'
+        return f'{v:+.2f}' if signed else f'{v:.2f}'
+    except Exception:
+        return '--'
+
+
+def _vrp_color(v):
+    if v is None or (isinstance(v, float) and np.isnan(v)):
+        return None
+    if v > 2:
+        return '#1a7e1a'   # green = market richer (sell vol potential)
+    if v < -2:
+        return '#c0392b'   # red = market cheaper (buy vol potential)
+    return None
+
+
+class _StrategyWorker(QThread):
+    """Background worker that builds today's distribution + ranks strategies."""
+    finished = pyqtSignal(dict, dict, str, str)   # eval_result, today_data, idx, horizon
+    error = pyqtSignal(str)
+
+    def __init__(self, idx_name: str, horizon: str,
+                 method: str = 'cat_d', sigma_mult: float = 1.0):
+        super().__init__()
+        self.idx_name = idx_name
+        self.horizon = horizon
+        self.method = method
+        self.sigma_mult = sigma_mult
+
+    def run(self):
+        try:
+            sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'research'))
+            import predict
+            from iv import strategy_eval
+
+            data = predict.get_today_signals()
+
+            # Get distribution samples for the chosen index/method/horizon
+            entry = data['indices'].get(self.idx_name)
+            if entry is None:
+                raise RuntimeError(f'No data for {self.idx_name}')
+            preds = entry.get('predictions', {})
+            mp = preds.get(self.method, {})
+            stats = mp.get(self.horizon, {})
+            samples = stats.get('vals')
+            if samples is None or len(samples) == 0:
+                raise RuntimeError(f'No samples for {self.idx_name}/{self.method}/{self.horizon}')
+
+            # Use last_close from this index (or any) as spot
+            cls = entry.get('classification') or {}
+            S0 = cls.get('last_close')
+            if S0 is None:
+                # ALL_5IDX has no single spot; use SPX as proxy
+                spx_entry = data['indices'].get('SPX', {})
+                S0 = (spx_entry.get('classification') or {}).get('last_close', 100)
+
+            result = strategy_eval.find_best_strategies(
+                np.asarray(samples), float(S0),
+                pricing='empirical', top_k=15, metric='pop',
+                primary_sigma_mult=self.sigma_mult,
+            )
+            self.finished.emit(result, data, self.idx_name, self.horizon)
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.error.emit(str(e))
+
+
+class OptionStrategyTab(QWidget):
+    """Show the empirical-fair-priced option strategies under our distribution.
+
+    Pivot insight: under empirical fair pricing every strategy has E[P&L]=0,
+    so what's interesting is the SHAPE of P&L (PoP, max gain, max loss).
+    The distribution skew/kurtosis from our model directly implies which
+    payoff shapes are 'attractive' for the user's risk preference.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(8, 8, 8, 8)
+
+        # Header controls
+        head = QHBoxLayout()
+        head.addWidget(QLabel('<b>Option Strategy Builder</b>'))
+        head.addSpacing(20)
+        head.addWidget(QLabel('Index:'))
+        self.idx_combo = QComboBox()
+        for i in ['ALL_5IDX', 'SPX', 'NDX', 'DJI', 'RUT', 'SOX', 'TWII']:
+            self.idx_combo.addItem(i, i)
+        self.idx_combo.setCurrentText('SPX')
+        head.addWidget(self.idx_combo)
+        head.addWidget(QLabel('Method:'))
+        self.method_combo = QComboBox()
+        self.method_combo.addItem('B · Shape',  'cat_b')
+        self.method_combo.addItem('C · K-means', 'cat_c')
+        self.method_combo.addItem('D · RSI',    'cat_d')
+        self.method_combo.setCurrentIndex(2)
+        head.addWidget(self.method_combo)
+        head.addWidget(QLabel('Horizon:'))
+        self.h_combo = QComboBox()
+        self.h_combo.addItem('5d', 'fwd_5d')
+        self.h_combo.addItem('20d', 'fwd_20d')
+        self.h_combo.setCurrentIndex(1)
+        head.addWidget(self.h_combo)
+        head.addWidget(QLabel('Sort by:'))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItem('PoP %',  'pop')
+        self.sort_combo.addItem('Sharpe', 'sharpe')
+        self.sort_combo.addItem('E[P&L]', 'e_pnl')
+        head.addWidget(self.sort_combo)
+        # σ multiplier input — strikes are placed at ±k×σ_log of our distribution
+        head.addWidget(QLabel('σ mult:'))
+        self.sigma_spin = QDoubleSpinBox()
+        self.sigma_spin.setDecimals(2)
+        self.sigma_spin.setRange(0.10, 5.00)
+        self.sigma_spin.setSingleStep(0.25)
+        self.sigma_spin.setValue(1.00)
+        self.sigma_spin.setSuffix('  (× σ_log)')
+        self.sigma_spin.setToolTip(
+            'Strikes used by candidates are placed at multiples of this σ.\n'
+            '  1.0  → ±0.5σ, ±1σ, ±1.5σ, ±2σ around spot\n'
+            '  0.5  → ±0.25σ, ±0.5σ, ±0.75σ, ±1σ\n'
+            '  2.0  → ±1σ, ±2σ, ±3σ, ±4σ\n'
+            '\n(changes auto-trigger re-search)'
+        )
+        # Auto re-run when sigma changes (uses cached today_data so it's fast)
+        self.sigma_spin.valueChanged.connect(self._on_sigma_change)
+        head.addWidget(self.sigma_spin)
+        self.btn_run = QPushButton('Find strategies')
+        self.btn_run.clicked.connect(self._run)
+        head.addWidget(self.btn_run)
+        head.addStretch()
+        outer.addLayout(head)
+
+        # Status / dist info
+        self.info_label = QLabel(
+            '<i>Empirical fair pricing: option price = E[payoff] under our '
+            'distribution.  All strategies have E[P&L]=0 by construction; '
+            'compare them by SHAPE (PoP, max gain/loss, breakevens).</i>')
+        self.info_label.setStyleSheet('color: #555; font-size: 9pt; padding: 2px;')
+        self.info_label.setWordWrap(True)
+        outer.addWidget(self.info_label)
+
+        # Splitter: top (table left, charts right), bottom (P&L histogram)
+        body = QHBoxLayout()
+        body.setSpacing(8)
+
+        # Left: strategy table
+        self.table = QTableWidget()
+        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SingleSelection)
+        self.table.itemSelectionChanged.connect(self._on_select)
+        self.table.setAlternatingRowColors(True)
+        self.table.setMinimumWidth(450)
+        body.addWidget(self.table, stretch=2)
+
+        # Right: single canvas with two stacked sharex subplots
+        right = QVBoxLayout()
+        right.setSpacing(4)
+        self.canvas_combined = MplCanvas(self, width=8, height=8, dpi=100)
+        right.addWidget(self.canvas_combined)
+        body.addLayout(right, stretch=3)
+
+        outer.addLayout(body, stretch=1)
+
+        self._loaded = False
+        self._result = None
+        self._S0 = None
+        self._last_today_data = None
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        if not self._loaded:
+            self._loaded = True
+            self._run()
+
+    def _run(self):
+        idx = self.idx_combo.currentData() or 'SPX'
+        method = self.method_combo.currentData() or 'cat_d'
+        horizon = self.h_combo.currentData() or 'fwd_20d'
+        sigma_mult = float(self.sigma_spin.value())
+        self.btn_run.setEnabled(False)
+        self.info_label.setText('Computing strategies...')
+        self.worker = _StrategyWorker(idx, horizon, method, sigma_mult)
+        self.worker.finished.connect(self._on_done)
+        self.worker.error.connect(self._on_error)
+        self.worker.start()
+
+    def _on_sigma_change(self):
+        """Cheap re-run: reuse cached today_data (no yfinance fetch) and
+        just rebuild candidates with the new sigma multiplier."""
+        if self._result is None:
+            # Not loaded yet → defer to full _run
+            return
+        # Inline re-evaluate using cached samples
+        try:
+            sys.path.insert(0,
+                os.path.join(os.path.dirname(__file__), 'research'))
+            from iv import strategy_eval
+        except Exception:
+            return
+        idx = self.idx_combo.currentData() or 'SPX'
+        method = self.method_combo.currentData() or 'cat_d'
+        horizon = self.h_combo.currentData() or 'fwd_20d'
+        sigma_mult = float(self.sigma_spin.value())
+        # We need today_data to fetch samples - it was passed to _on_done
+        if not hasattr(self, '_last_today_data') or self._last_today_data is None:
+            return
+        entry = self._last_today_data['indices'].get(idx)
+        if entry is None: return
+        preds = entry.get('predictions', {})
+        samples = preds.get(method, {}).get(horizon, {}).get('vals')
+        if samples is None or len(samples) == 0: return
+        result = strategy_eval.find_best_strategies(
+            np.asarray(samples), float(self._S0),
+            pricing='empirical', top_k=15, metric='pop',
+            primary_sigma_mult=sigma_mult,
+        )
+        # Reuse the same emit-handler logic
+        self._on_done(result, self._last_today_data, idx, horizon)
+
+    def _on_error(self, msg: str):
+        self.btn_run.setEnabled(True)
+        self.info_label.setText(f"<span style='color:#c0392b'>Error: {msg}</span>")
+
+    def _on_done(self, result, today_data, idx, horizon):
+        self.btn_run.setEnabled(True)
+        self._result = result
+        self._last_today_data = today_data   # cache for sigma-change re-runs
+        self._S0 = result['S0']
+        S_T = result['S_T']
+        chain = result['chain']
+        idx_name = idx; h = horizon
+        method = self.method_combo.currentData()
+
+        # Distribution stats
+        log_returns = np.log(S_T / self._S0)
+        mu = log_returns.mean() * 100
+        sigma = log_returns.std() * 100
+        p_up = (S_T > self._S0).mean() * 100
+        sigma_mult = float(self.sigma_spin.value())
+        # σ_mult corresponds to a price band: spot × exp(±σ_mult × σ_log)
+        band_lo = self._S0 * float(np.exp(-sigma_mult * (sigma / 100)))
+        band_hi = self._S0 * float(np.exp(+sigma_mult * (sigma / 100)))
+        # Today's category
+        entry = today_data['indices'].get(idx_name) or {}
+        cls = entry.get('classification') or {}
+        cat = (cls.get(method) or '—')
+        info = (
+            f"<b>{idx_name}</b>  ·  S0=<b>{self._S0:,.2f}</b>  ·  horizon={h}  "
+            f"·  today's cat={cat}<br>"
+            f"<i>Distribution:</i> μ_log={mu:+.2f}%  σ_log={sigma:.2f}%  "
+            f"P(up)={p_up:.1f}%  N={len(S_T):,}  "
+            f"<br><i>Strikes</i>: ±{sigma_mult:g}σ → "
+            f"[<b>{band_lo:,.0f}</b>, <b>{band_hi:,.0f}</b>]  "
+            f"(also at 0.5×, 1.5×, 2× of this).  "
+            f"Pricing: empirical fair (E[payoff] under our distribution)"
+        )
+        self.info_label.setText(info)
+
+        # Re-sort by selected metric
+        metric = self.sort_combo.currentData()
+        results = sorted(result['all'],
+                         key=lambda r: r[metric], reverse=True)[:15]
+        # Clear selection first so selectRow(0) fires the change signal even
+        # when row 0 was already selected (otherwise charts won't redraw).
+        self.table.clearSelection()
+        self._populate_table(results)
+        if self.table.rowCount() > 0:
+            self.table.selectRow(0)
+            # Belt-and-braces: force redraw even if signal fires twice
+            top_item = self.table.item(0, 0)
+            if top_item is not None:
+                top_res = top_item.data(Qt.UserRole)
+                if top_res is not None:
+                    self._draw_payoff(top_res)
+
+    def _populate_table(self, results):
+        cols = ['Strategy', 'Cost', 'PoP %', 'E[P&L]',
+                'Max gain', 'Max loss', 'P10', 'P90']
+        self.table.setColumnCount(len(cols))
+        self.table.setHorizontalHeaderLabels(cols)
+        self.table.setRowCount(len(results))
+        for r, res in enumerate(results):
+            def make(text, align_right=True, color=None, bold=False):
+                it = QTableWidgetItem(text)
+                if align_right:
+                    it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if color:
+                    it.setForeground(QColor(color))
+                if bold:
+                    f = it.font(); f.setBold(True); it.setFont(f)
+                return it
+            self.table.setItem(r, 0, make(res['name'], align_right=False))
+            self.table.setItem(r, 1, make(f"{res['cost']:+.2f}"))
+            self.table.setItem(r, 2, make(f"{res['pop']:.1f}"))
+            self.table.setItem(r, 3, make(f"{res['e_pnl']:+.4f}", bold=True))
+            self.table.setItem(r, 4, make(f"{res['max_gain']:+.2f}",
+                                          color='#1a7e1a' if res['max_gain']>0 else None))
+            self.table.setItem(r, 5, make(f"{res['max_loss']:+.2f}",
+                                          color='#c0392b' if res['max_loss']<-1 else None))
+            self.table.setItem(r, 6, make(f"{res['p10']:+.2f}"))
+            self.table.setItem(r, 7, make(f"{res['p90']:+.2f}"))
+            self.table.item(r, 0).setData(Qt.UserRole, res)
+        self.table.resizeColumnsToContents()
+
+    def _on_select(self):
+        rows = self.table.selectionModel().selectedRows()
+        if not rows: return
+        r = rows[0].row()
+        item = self.table.item(r, 0)
+        if not item: return
+        res = item.data(Qt.UserRole)
+        if not res: return
+        self._draw_payoff(res)
+
+    def _draw_payoff(self, res: dict):
+        """Draw payoff diagram (top) + expected-contribution curve (bottom)
+        on a single shared-x figure."""
+        if self._result is None: return
+        S_T = self._result['S_T']
+        S0 = self._S0
+        strat = res['strategy']
+        from iv.strategy_eval import expected_contribution_curve
+
+        fig = self.canvas_combined.fig
+        fig.clear()
+        ax_top = fig.add_subplot(2, 1, 1)
+        ax_bot = fig.add_subplot(2, 1, 2, sharex=ax_top)
+
+        # ── Common x-range based on price distribution
+        s_lo = float(np.percentile(S_T, 0.5)) * 0.97
+        s_hi = float(np.percentile(S_T, 99.5)) * 1.03
+        grid = np.linspace(s_lo, s_hi, 400)
+        pnl_grid = strat.pnl(grid)
+
+        # ── TOP: Payoff diagram with distribution overlay
+        ax_top.fill_between(grid, 0, pnl_grid, where=(pnl_grid >= 0),
+                            color='#27ae60', alpha=0.25, label='profit')
+        ax_top.fill_between(grid, 0, pnl_grid, where=(pnl_grid < 0),
+                            color='#c0392b', alpha=0.25, label='loss')
+        ax_top.plot(grid, pnl_grid, color='black', lw=1.5)
+        ax_top.axhline(0, color='gray', lw=0.6)
+        ax_top.axvline(S0, color='blue', lw=0.8, ls='--',
+                       label=f'spot {S0:.0f}')
+        for be in res.get('breakevens', []):
+            ax_top.axvline(be, color='purple', lw=0.6, ls=':', alpha=0.7)
+        # Distribution overlay on twin axis
+        ax_top2 = ax_top.twinx()
+        ax_top2.hist(S_T, bins=60, density=True, alpha=0.18,
+                     color='#4575b4', edgecolor='none')
+        ax_top2.set_ylabel('probability density', color='#4575b4', fontsize=9)
+        ax_top2.tick_params(axis='y', labelcolor='#4575b4', labelsize=8)
+        ax_top.set_ylabel('P&L per share')
+        ax_top.set_title(
+            f"{res['name']}   PoP={res['pop']:.1f}%   "
+            f"max±=({res['max_gain']:+.1f}, {res['max_loss']:+.1f})",
+            fontsize=11
+        )
+        ax_top.legend(loc='upper left', fontsize=8)
+        ax_top.grid(alpha=0.25)
+        # Hide top x-axis tick labels (shared with bottom)
+        ax_top.tick_params(axis='x', labelbottom=False)
+
+        # ── BOTTOM: Expected-contribution curve  P&L(S_T) × pdf(S_T)
+        # Sum of this curve = E[P&L]  (always ≈0 under empirical fair pricing)
+        ec = expected_contribution_curve(strat, S_T)
+        contrib = ec['contribution']
+        ax_bot.fill_between(ec['grid'], 0, contrib, where=(contrib >= 0),
+                            color='#27ae60', alpha=0.55,
+                            label='profit contribution')
+        ax_bot.fill_between(ec['grid'], 0, contrib, where=(contrib < 0),
+                            color='#c0392b', alpha=0.55,
+                            label='loss contribution')
+        ax_bot.plot(ec['grid'], contrib, color='black', lw=1.0)
+        ax_bot.axhline(0, color='gray', lw=0.6)
+        ax_bot.axvline(S0, color='blue', lw=0.6, ls='--', alpha=0.6)
+        for be in res.get('breakevens', []):
+            ax_bot.axvline(be, color='purple', lw=0.5, ls=':', alpha=0.5)
+        ax_bot.set_xlabel('underlying price at expiry')
+        ax_bot.set_ylabel('P&L × probability')
+        ax_bot.set_title(
+            f"Expected contribution per price   "
+            f"(sum of green + red = E[P&L] = {res['e_pnl']:+.4f})",
+            fontsize=10
+        )
+        ax_bot.legend(loc='best', fontsize=8)
+        ax_bot.grid(alpha=0.25)
+
+        # Force a clean x-range
+        ax_top.set_xlim(s_lo, s_hi)
+
+        fig.tight_layout()
+        self.canvas_combined.draw()
+
+
+class MarketWindowsPage(QWidget):
+    """Container for sub-tabs:
+       1. 今日訊號  — today's classification + 7-range overlay charts
+       2. 歷史回測  — user-driven backtest
+       3. IV vs σ — market IV vs our empirical σ
+       4. Strategy Builder — option strategies under our empirical distribution
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        self.tabs = QTabWidget()
+        self.today_tab = TodaySignalsTab()
+        self.backtest_tab = BacktestTab()
+        self.iv_tab = IVComparisonTab()
+        self.strategy_tab = OptionStrategyTab()
+        self.tabs.addTab(self.today_tab, "今日訊號 (Today)")
+        self.tabs.addTab(self.backtest_tab, "歷史回測 (Backtest)")
+        self.tabs.addTab(self.iv_tab, "IV vs σ (Options)")
+        self.tabs.addTab(self.strategy_tab, "Strategy Builder")
+        layout.addWidget(self.tabs)
+
+
 # ─── Stock Detail Page ────────────────────────────────────────────────
 
 class StockDetailPage(QWidget):
@@ -936,6 +2156,11 @@ class MainWindow(QMainWindow):
         self.btn_dashboard.clicked.connect(self.show_dashboard)
         top_bar.addWidget(self.btn_dashboard)
 
+        self.btn_market = QPushButton("Market Windows")
+        self.btn_market.setFont(QFont('Arial', 11))
+        self.btn_market.clicked.connect(self.show_market_windows)
+        top_bar.addWidget(self.btn_market)
+
         top_bar.addWidget(QLabel("  Stock: "))
         self.ticker_combo = QComboBox()
         self.ticker_combo.setFont(QFont('Arial', 11))
@@ -956,8 +2181,10 @@ class MainWindow(QMainWindow):
         self.stack = QStackedWidget()
         self.dashboard_page = DashboardPage()
         self.stock_page = StockDetailPage()
-        self.stack.addWidget(self.dashboard_page)
-        self.stack.addWidget(self.stock_page)
+        self.market_page = MarketWindowsPage()
+        self.stack.addWidget(self.dashboard_page)   # 0
+        self.stack.addWidget(self.stock_page)       # 1
+        self.stack.addWidget(self.market_page)      # 2
         main_layout.addWidget(self.stack)
 
         # Status bar
@@ -980,6 +2207,10 @@ class MainWindow(QMainWindow):
 
     def show_dashboard(self):
         self.stack.setCurrentIndex(0)
+        self.ticker_combo.setCurrentIndex(-1)
+
+    def show_market_windows(self):
+        self.stack.setCurrentIndex(2)
         self.ticker_combo.setCurrentIndex(-1)
 
     def on_ticker_selected(self, ticker):

@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "FastAPI web server (server.py)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["server.py"],
+      "port": 8000
+    },
+    {
+      "name": "PyQt5 desktop app (app.py)",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["app.py"],
+      "port": 0
+    }
+  ]
+}

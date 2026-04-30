@@ -4,6 +4,19 @@ rates_history/
 __pycache__/
 *.pyc
 
+# Research module — exclude generated artifacts but keep code + minimum runtime files
+research/output/*.png
+research/output/summary.csv
+research/output/flagged.csv
+research/output/per_index_summary.csv
+research/data_cache/
+research/iv/cache/
+research/iv/results/
+research/nn/results/
+# Keep:
+#   research/output/window_panel.csv  (runtime, predict.py uses this)
+#   research/models/classifier_bundle.pkl  (runtime, classifier model)
+
 # Environment
 .env
 .env.txt
