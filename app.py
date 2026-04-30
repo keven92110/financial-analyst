@@ -1968,23 +1968,43 @@ class OptionStrategyTab(QWidget):
         for be in res.get('breakevens', []):
             ax_top.axvline(be, color='purple', lw=0.6, ls=':', alpha=0.7)
 
-        # ── Per-leg strike markers + labels (so user sees how the legs
-        #    decompose visually)
+        # ── Per-leg strike markers + labels.
+        # Group by strike so legs at the same strike (e.g. iron butterfly's
+        # short put + short call both at K_atm) don't overlap visually.
+        from collections import defaultdict
+        legs_by_strike = defaultdict(list)
         for leg in strat.legs:
-            leg_color = '#1a7e1a' if leg.side == 'short' else '#c0392b'
-            ax_top.axvline(leg.strike, color=leg_color, lw=0.8,
+            legs_by_strike[leg.strike].append(leg)
+
+        for strike, legs_here in legs_by_strike.items():
+            # Mixed sides → grey line; uniform side → side-tinted line
+            sides = {l.side for l in legs_here}
+            if len(sides) == 1:
+                line_color = '#1a7e1a' if 'short' in sides else '#c0392b'
+            else:
+                line_color = '#555'
+            ax_top.axvline(strike, color=line_color, lw=0.8,
                            ls='-.', alpha=0.45)
-            sign = '+L' if leg.side == 'long' else '-S'
-            typ = leg.type[0].upper()
+
+            # Build combined label, one line per leg at this strike
+            label_lines = [f'K={strike:.0f}']
+            for leg in legs_here:
+                sign = '+L' if leg.side == 'long' else '-S'
+                typ = leg.type[0].upper()
+                label_lines.append(f'{sign}{typ} @ {leg.premium:.2f}')
+            label = '\n'.join(label_lines)
+
+            # Color of bbox: side-specific if uniform, else neutral
+            box_color = (line_color if len(sides) == 1 else '#666')
             ax_top.annotate(
-                f"{sign}{typ} {leg.strike:.0f}\n@ {leg.premium:.2f}",
-                xy=(leg.strike, 0),
+                label,
+                xy=(strike, 0),
                 xytext=(0, 14), textcoords='offset points',
                 fontsize=7, ha='center', va='bottom',
-                color=leg_color,
-                bbox=dict(boxstyle='round,pad=0.2',
-                          facecolor='white', edgecolor=leg_color,
-                          linewidth=0.6, alpha=0.85),
+                color=box_color,
+                bbox=dict(boxstyle='round,pad=0.25',
+                          facecolor='white', edgecolor=box_color,
+                          linewidth=0.7, alpha=0.9),
             )
 
         # Distribution overlay on twin axis
