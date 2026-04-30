@@ -1680,6 +1680,18 @@ class _StrategyWorker(QThread):
                 pricing='empirical', top_k=15, metric='pop',
                 primary_sigma_mult=self.sigma_mult,
             )
+            # Also fetch per-range distributions so the chart background can
+            # show recent vs older history as overlaid PMFs (matches the
+            # "Today" / "Backtest" tabs).
+            try:
+                range_dists, _ = predict.get_today_distributions_by_range(
+                    self.method, self.idx_name, data
+                )
+                result['range_dists'] = range_dists
+            except Exception as e:
+                print(f'range_dists fetch failed: {e}')
+                result['range_dists'] = {}
+            result['horizon_key'] = self.horizon
             self.finished.emit(result, data, self.idx_name, self.horizon)
         except Exception as e:
             import traceback; traceback.print_exc()
@@ -1838,7 +1850,10 @@ class OptionStrategyTab(QWidget):
             pricing='empirical', top_k=15, metric='pop',
             primary_sigma_mult=sigma_mult,
         )
-        # Reuse the same emit-handler logic
+        # Range distributions don't change with sigma — copy from cached result
+        if self._result is not None:
+            result['range_dists'] = self._result.get('range_dists', {})
+        result['horizon_key'] = horizon
         self._on_done(result, self._last_today_data, idx, horizon)
 
     def _on_error(self, msg: str):
@@ -2007,12 +2022,56 @@ class OptionStrategyTab(QWidget):
                           linewidth=0.7, alpha=0.9),
             )
 
-        # Distribution overlay on twin axis
+        # ── Per-range distribution overlay on twin axis (same colour scheme
+        #    as Today / Backtest tabs: recent ranges opaque, older transparent)
         ax_top2 = ax_top.twinx()
-        ax_top2.hist(S_T, bins=60, density=True, alpha=0.18,
-                     color='#4575b4', edgecolor='none')
-        ax_top2.set_ylabel('probability density', color='#4575b4', fontsize=9)
-        ax_top2.tick_params(axis='y', labelcolor='#4575b4', labelsize=8)
+        range_dists = self._result.get('range_dists', {}) if self._result else {}
+        horizon_key = self._result.get('horizon_key', 'fwd_20d') if self._result else 'fwd_20d'
+
+        bins = np.linspace(s_lo, s_hi, 50)
+        centers = (bins[:-1] + bins[1:]) / 2
+        # Same palette / alphas used elsewhere in the app
+        R_LABELS = ['6M', '12M', '2Y', '5Y', '10Y', '20Y', 'Full']
+        R_COLORS = ['#d73027', '#fc8d59', '#fdae61', '#a6d96a',
+                    '#66bd63', '#1a9850', '#2c3e50']
+        R_ALPHAS = [1.00, 0.92, 0.82, 0.72, 0.60, 0.48, 0.40]
+        R_LWS    = [1.6,  1.5,  1.4,  1.3,  1.2,  1.1,  1.2]
+
+        plotted_any = False
+        for i, lbl in enumerate(R_LABELS):
+            rd = range_dists.get(lbl, {}).get(horizon_key, {})
+            vals = rd.get('vals')
+            if vals is None or len(vals) == 0:
+                continue
+            n = len(vals)
+            range_S_T = S0 * np.exp(np.asarray(vals))
+            counts, _ = np.histogram(range_S_T, bins=bins)
+            if counts.sum() == 0:
+                continue
+            pmf = counts / counts.sum()
+            ax_top2.plot(centers, pmf,
+                         color=R_COLORS[i], lw=R_LWS[i],
+                         alpha=R_ALPHAS[i],
+                         drawstyle='steps-mid',
+                         label=f'{lbl} (N={n:,})')
+            ax_top2.fill_between(centers, 0, pmf,
+                                 color=R_COLORS[i],
+                                 alpha=R_ALPHAS[i] * 0.12,
+                                 step='mid')
+            plotted_any = True
+
+        if not plotted_any:
+            # Fallback: single hist of all S_T (e.g. range_dists empty)
+            ax_top2.hist(S_T, bins=60, density=True, alpha=0.18,
+                         color='#4575b4', edgecolor='none')
+
+        ax_top2.set_ylabel('probability per range', fontsize=8, color='#444')
+        ax_top2.tick_params(axis='y', labelsize=7, colors='#444')
+        if plotted_any:
+            ax_top2.legend(loc='upper right', fontsize=7,
+                           framealpha=0.85, ncol=2,
+                           title='trailing range',
+                           title_fontsize=7)
         ax_top.set_ylabel('P&L per share')
 
         # Two-line title: line 1 = strategy stats, line 2 = leg breakdown
