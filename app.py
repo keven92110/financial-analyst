@@ -1007,7 +1007,11 @@ class TodaySignalsTab(QWidget):
         super().showEvent(event)
         if not self._loaded:
             self._loaded = True
-            self.kmeans_ref.ensure_loaded()
+            # Don't call kmeans_ref.ensure_loaded() here — it synchronously
+            # reads the 36MB window_panel.csv on the GUI thread and freezes
+            # the UI for several seconds. The reload() worker loads the panel
+            # in the background; ensure_loaded() is then called from _on_data
+            # where it reads from the populated cache (fast).
             self.reload(refresh=False)
 
     # ── Model-age / retrain plumbing
@@ -1082,6 +1086,9 @@ class TodaySignalsTab(QWidget):
                                 for k, v in last_per_idx.items())
         self.as_of_label.setText(
             f"As of: {as_of_str}  (per-index latest: {per_idx_str})")
+        # Panel is now in predict._panel_cache — safe to load reference widget
+        # (reads from cache, doesn't re-parse CSV)
+        self.kmeans_ref.ensure_loaded()
         self._render_for_view()
 
     def _on_view_change(self):
@@ -1238,6 +1245,32 @@ class TodaySignalsTab(QWidget):
         self.chart_canvas.draw()
 
 
+class _BacktestInitWorker(QThread):
+    """One-shot worker that loads the historical window panel into the
+    predict module's cache, then returns the category list for the
+    initially-selected (method, index)."""
+    finished = pyqtSignal(list)
+    error = pyqtSignal(str)
+
+    def __init__(self, method: str, idx: str):
+        super().__init__()
+        self.method = method
+        self.idx = idx
+
+    def run(self):
+        try:
+            sys.path.insert(0,
+                os.path.join(os.path.dirname(__file__), 'research'))
+            import predict
+            panel = predict.load_panel()    # populates cache
+            cats = predict.get_categories_for_method(panel, self.method,
+                                                     index_name=self.idx)
+            self.finished.emit(list(cats))
+        except Exception as e:
+            import traceback; traceback.print_exc()
+            self.error.emit(str(e))
+
+
 class BacktestTab(QWidget):
     """User-driven backtest viewer with 7 trailing windows."""
 
@@ -1294,22 +1327,45 @@ class BacktestTab(QWidget):
         super().showEvent(event)
         if not self._loaded:
             self._loaded = True
-            self._refresh_categories()
-            self._run()
+            # First load uses an init worker so we don't block the UI thread
+            # on the 36MB window_panel.csv read. After init, _refresh_categories
+            # reads from the cached panel (fast, can stay synchronous).
+            self.btn_run.setEnabled(False)
+            self.status_label.setText('Loading window panel...')
+            self._init_worker = _BacktestInitWorker(
+                self.method_combo.currentData(),
+                self.idx_combo.currentData(),
+            )
+            self._init_worker.finished.connect(self._on_init_done)
+            self._init_worker.error.connect(self._on_init_error)
+            self._init_worker.start()
+
+    def _on_init_done(self, cats: list):
+        self.btn_run.setEnabled(True)
+        self.status_label.setText('')
+        self.cat_combo.clear()
+        self.cat_combo.addItems(cats)
+        # Now panel is cached → trigger initial plot (uses fast in-memory path)
+        self._run()
+
+    def _on_init_error(self, msg: str):
+        self.btn_run.setEnabled(True)
+        self.status_label.setText(f'Init error: {msg}')
 
     def _refresh_categories(self):
+        """Synchronous; only safe to call AFTER first init has populated cache."""
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'research'))
             import predict
-        except Exception as e:
+        except Exception:
             return
         method = self.method_combo.currentData()
         idx = self.idx_combo.currentData()
         try:
-            panel = predict.load_panel()
+            panel = predict.load_panel()   # reads from cache after first init
             cats = predict.get_categories_for_method(panel, method,
                                                      index_name=idx)
-        except Exception as e:
+        except Exception:
             cats = []
         prev = self.cat_combo.currentText()
         self.cat_combo.clear()
