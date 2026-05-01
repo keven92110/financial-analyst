@@ -416,6 +416,28 @@ def load_all_eps(tickers, cache_hours=12, force_refresh=False):
             if age_hours < cache_hours:
                 use_cache = True
 
+            # Data-staleness check: if the most recent reported (non-estimate)
+            # EPS row is > ~95 days old, a new quarterly print is probably out.
+            if use_cache:
+                try:
+                    df_check = pd.read_csv(cache_path)
+                    df_check['Date'] = pd.to_datetime(df_check['Date'],
+                                                     format='%Y.%m.%d',
+                                                     errors='coerce')
+                    today = pd.Timestamp.today()
+                    reported = df_check[(df_check['EPS'].notna()) &
+                                        (df_check['Date'] <= today)]
+                    if not reported.empty:
+                        latest = reported['Date'].max()
+                        days_since = (today - latest).days
+                        if days_since > 95:
+                            print(f"  {ticker}: EPS cache stale "
+                                  f"(latest reported {latest.date()}, "
+                                  f"{days_since}d ago) — refetching")
+                            use_cache = False
+                except Exception:
+                    pass
+
         if use_cache:
             df = pd.read_csv(cache_path)
         else:

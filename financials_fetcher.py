@@ -91,6 +91,25 @@ def load_all_financials(tickers=None, cache_hours=24, force_refresh=False):
                 if age < cache_hours:
                     use_cache = True
 
+            # Even if file is fresh, the DATA inside may be stale: if the
+            # latest quarter on disk is > ~95 days old we should refetch
+            # because a new quarterly report is almost certainly available.
+            if use_cache:
+                quarterly_file = os.path.join(ticker_dir, 'income_quarterly.csv')
+                if os.path.exists(quarterly_file):
+                    try:
+                        qdf = pd.read_csv(quarterly_file, index_col=0)
+                        if not qdf.empty and len(qdf.columns) > 0:
+                            latest = pd.to_datetime(qdf.columns[0])
+                            days_since = (pd.Timestamp.today() - latest).days
+                            if days_since > 95:
+                                print(f"  {ticker}: cache data stale "
+                                      f"(latest qtr {latest.date()}, "
+                                      f"{days_since}d ago) — refetching")
+                                use_cache = False
+                    except Exception:
+                        pass
+
         if use_cache:
             data = {}
             for key, (_, csv_name) in STATEMENTS.items():

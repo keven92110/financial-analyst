@@ -128,21 +128,24 @@ class StockWorker(QThread):
     finished = pyqtSignal(str, dict)
     progress = pyqtSignal(str)
 
-    def __init__(self, ticker, rates_data=None, breakeven_data=None):
+    def __init__(self, ticker, rates_data=None, breakeven_data=None,
+                 force_refresh=False):
         super().__init__()
         self.ticker = ticker
         self.rates_data = rates_data
         self.breakeven_data = breakeven_data
+        self.force_refresh = force_refresh
 
     def run(self):
         t = self.ticker
         data = {}
         try:
             self.progress.emit(f"Fetching EPS for {t}...")
-            data['eps'] = load_all_eps([t])[t]
+            data['eps'] = load_all_eps([t], force_refresh=self.force_refresh)[t]
 
             self.progress.emit(f"Fetching financials for {t}...")
-            data['financials'] = load_all_financials([t])[t]
+            data['financials'] = load_all_financials(
+                [t], force_refresh=self.force_refresh)[t]
 
             self.progress.emit(f"Fetching price history for {t}...")
             stock = yf.Ticker(t)
@@ -2407,14 +2410,14 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentIndex(2)
         self.ticker_combo.setCurrentIndex(-1)
 
-    def on_ticker_selected(self, ticker):
+    def on_ticker_selected(self, ticker, force_refresh=False):
         if not ticker or ticker not in TICKERS:
             return
 
         self.stack.setCurrentIndex(1)
 
-        # Use cache if available
-        if ticker in self.stock_cache:
+        # Use cache if available (only when not forcing refresh)
+        if not force_refresh and ticker in self.stock_cache:
             self.stock_page.update_data(ticker, self.stock_cache[ticker])
             self.statusBar().showMessage(f"{ticker} loaded from cache.", 3000)
             return
@@ -2426,7 +2429,9 @@ class MainWindow(QMainWindow):
         rates = self.dashboard_data.get('rates') if self.dashboard_data else None
         breakeven = self.dashboard_data.get('breakeven') if self.dashboard_data else None
 
-        self.active_worker = StockWorker(ticker, rates_data=rates, breakeven_data=breakeven)
+        self.active_worker = StockWorker(ticker, rates_data=rates,
+                                         breakeven_data=breakeven,
+                                         force_refresh=force_refresh)
         self.active_worker.progress.connect(self.statusBar().showMessage)
         self.active_worker.finished.connect(self.on_stock_loaded)
         self.active_worker.start()
@@ -2439,9 +2444,16 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{ticker} ready.", 5000)
 
     def refresh_data(self):
+        """Force-refresh all caches: dashboard, in-memory stock cache, AND
+        the on-disk EPS / financials caches via force_refresh=True."""
         self.stock_cache.clear()
         self.dashboard_data = None
         self.load_dashboard()
+        # If a stock is currently selected, reload it with force_refresh
+        current = self.ticker_combo.currentText()
+        if current and current in TICKERS:
+            self.on_ticker_selected(current, force_refresh=True)
+        self.statusBar().showMessage("Refreshing all data (forcing cache bypass)...")
         self.statusBar().showMessage("Refreshing all data...")
 
 
