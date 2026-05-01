@@ -945,9 +945,9 @@ class TodaySignalsTab(QWidget):
         head1.addStretch()
         head1.addWidget(QLabel("Index:"))
         self.idx_combo = QComboBox()
-        for i in ['ALL_5IDX', 'DJI', 'NDX', 'SOX', 'SPX', 'RUT', 'TWII']:
+        for i in ['TWII', 'ALL_5IDX', 'DJI', 'NDX', 'SOX', 'SPX', 'RUT']:
             self.idx_combo.addItem(i, i)
-        self.idx_combo.setCurrentText('ALL_5IDX')
+        self.idx_combo.setCurrentText('TWII')
         self.idx_combo.currentIndexChanged.connect(self._on_view_change)
         head1.addWidget(self.idx_combo)
         head1.addWidget(QLabel("Method:"))
@@ -1295,8 +1295,9 @@ class BacktestTab(QWidget):
 
         ctrl.addWidget(QLabel('Index:'))
         self.idx_combo = QComboBox()
-        for i in ['ALL_5IDX', 'SPX', 'DJI', 'NDX', 'RUT', 'SOX', 'TWII']:
+        for i in ['TWII', 'ALL_5IDX', 'SPX', 'DJI', 'NDX', 'RUT', 'SOX']:
             self.idx_combo.addItem(i, i)
+        self.idx_combo.setCurrentText('TWII')
         self.idx_combo.currentIndexChanged.connect(self._refresh_categories)
         ctrl.addWidget(self.idx_combo)
 
@@ -1718,9 +1719,9 @@ class OptionStrategyTab(QWidget):
         head.addSpacing(20)
         head.addWidget(QLabel('Index:'))
         self.idx_combo = QComboBox()
-        for i in ['ALL_5IDX', 'SPX', 'NDX', 'DJI', 'RUT', 'SOX', 'TWII']:
+        for i in ['TWII', 'ALL_5IDX', 'SPX', 'NDX', 'DJI', 'RUT', 'SOX']:
             self.idx_combo.addItem(i, i)
-        self.idx_combo.setCurrentText('SPX')
+        self.idx_combo.setCurrentText('TWII')
         head.addWidget(self.idx_combo)
         head.addWidget(QLabel('Method:'))
         self.method_combo = QComboBox()
